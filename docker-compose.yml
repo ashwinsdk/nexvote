@@ -1,0 +1,85 @@
+# NexVote – Docker Compose (development)
+# Usage: docker compose up --build
+
+services:
+  # ── PostgreSQL + pgvector ───────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexvote
+      POSTGRES_PASSWORD: nexvote_dev
+      POSTGRES_DB: nexvote_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexvote"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Database migrations (run once) ──────────────────────────────────────
+  db-migrate:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://nexvote:nexvote_dev@postgres:5432/nexvote_dev
+    command: ["npx", "knex", "migrate:latest", "--knexfile", "knexfile.js"]
+
+  # ── AI service ──────────────────────────────────────────────────────────
+  ai:
+    build: ./ai
+    restart: unless-stopped
+    environment:
+      AI_API_KEY: ${AI_API_KEY:-change-me-ai-api-key}
+      AI_SERVICE_PORT: "8000"
+      EMBEDDING_MODEL: all-MiniLM-L6-v2
+      SUMMARIZER_MODEL: facebook/bart-large-cnn
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ── Backend API ─────────────────────────────────────────────────────────
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai:
+        condition: service_started
+    environment:
+      PORT: "3000"
+      DATABASE_URL: postgres://nexvote:nexvote_dev@postgres:5432/nexvote_dev
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
+      AI_SERVICE_URL: http://ai:8000
+      AI_API_KEY: ${AI_API_KEY:-change-me-ai-api-key}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL:-}
+      RELAYER_PRIVATE_KEY: ${RELAYER_PRIVATE_KEY:-}
+      NEXVOTE_REGISTRY_ADDRESS: ${NEXVOTE_REGISTRY_ADDRESS:-}
+      LOG_LEVEL: debug
+    ports:
+      - "3000:3000"
+
+  # ── Frontend ────────────────────────────────────────────────────────────
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "4200:80"
+
+volumes:
+  pgdata:

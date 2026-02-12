@@ -1,0 +1,17 @@
+{
+    "name": "nexvote-db",
+    "version": "0.1.0",
+    "private": true,
+    "scripts": {
+        "migrate": "knex migrate:latest",
+        "migrate:rollback": "knex migrate:rollback",
+        "seed": "knex seed:run",
+        "migrate:make": "knex migrate:make"
+    },
+    "dependencies": {
+        "bcryptjs": "^3.0.3",
+        "dotenv": "^16.4.0",
+        "knex": "^3.1.0",
+        "pg": "^8.13.0"
+    }
+}
