@@ -1,4 +1,3 @@
-import { franc } from 'franc';
 import logger from '../logger';
 import { aiService } from './ai';
 
@@ -21,6 +20,14 @@ const MAX_CACHE_ENTRIES = 1000;
 const cacheKey = (text: string, source: Locale, target: Locale) =>
     `${source}:${target}:${text}`;
 
+let francModule: any = null;
+const loadFranc = async () => {
+    if (!francModule) {
+        francModule = await import('franc');
+    }
+    return francModule.franc;
+};
+
 export const normalizeLocale = (value?: string | null): Locale => {
     const trimmed = (value || '').toLowerCase().trim();
     if (SUPPORTED_LOCALES.includes(trimmed as Locale)) {
@@ -29,14 +36,20 @@ export const normalizeLocale = (value?: string | null): Locale => {
     return 'en';
 };
 
-export const detectLocale = (text: string): Locale => {
+export const detectLocale = async (text: string): Promise<Locale> => {
     const sample = text.trim();
     if (sample.length < 3) {
         return 'en';
     }
 
-    const lang = franc(sample, { minLength: 3 });
-    return FRANC_TO_LOCALE[lang] || 'en';
+    try {
+        const franc = await loadFranc();
+        const lang = franc(sample, { minLength: 3 });
+        return FRANC_TO_LOCALE[lang] || 'en';
+    } catch (err) {
+        logger.warn({ err }, 'Failed to detect language');
+        return 'en';
+    }
 };
 
 export const translateText = async (

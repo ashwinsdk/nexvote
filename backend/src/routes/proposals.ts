@@ -329,8 +329,8 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
             return;
         }
 
-        const titleLang = detectLocale(body.title);
-        const textLang = detectLocale(body.text);
+        const titleLang = await detectLocale(body.title);
+        const textLang = await detectLocale(body.text);
         const titleEn = titleLang === 'en' ? body.title : await translateText(body.title, titleLang, 'en');
         const textEn = textLang === 'en' ? body.text : await translateText(body.text, textLang, 'en');
 
@@ -664,7 +664,7 @@ router.post('/:id/comment', authMiddleware, async (req: Request, res: Response) 
             return;
         }
 
-        const bodyLang = detectLocale(commentBody);
+        const bodyLang = await detectLocale(commentBody);
         const bodyEn = bodyLang === 'en' ? commentBody : await translateText(commentBody, bodyLang, 'en');
 
         const [comment] = await db('comments')

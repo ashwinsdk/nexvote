@@ -174,8 +174,8 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     try {
         const body = createCommunitySchema.parse(req.body);
 
-        const nameLang = detectLocale(body.name);
-        const descriptionLang = body.description ? detectLocale(body.description) : 'en';
+        const nameLang = await detectLocale(body.name);
+        const descriptionLang = body.description ? await detectLocale(body.description) : 'en';
         const nameEn = nameLang === 'en' ? body.name : await translateText(body.name, nameLang, 'en');
         const descriptionEn = body.description
             ? (descriptionLang === 'en'
