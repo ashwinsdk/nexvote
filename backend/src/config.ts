@@ -3,10 +3,26 @@ import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+const normalizeOrigin = (origin: string): string => origin.trim().replace(/\/$/, '');
+
+const parseCorsOrigins = (value?: string): string | string[] => {
+    const raw = (value || 'http://localhost:4200').trim();
+    if (!raw.includes(',')) {
+        return normalizeOrigin(raw);
+    }
+
+    const origins = raw
+        .split(',')
+        .map((entry) => normalizeOrigin(entry))
+        .filter(Boolean);
+
+    return origins.length > 0 ? origins : 'http://localhost:4200';
+};
+
 export const config = {
     port: parseInt(process.env.PORT || '3000', 10),
     nodeEnv: process.env.NODE_ENV || 'development',
-    corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:4200',
+    corsOrigin: parseCorsOrigins(process.env.CORS_ORIGIN),
 
     // Database
     databaseUrl: process.env.DATABASE_URL || 'postgresql://nexvote:nexvote@localhost:5432/nexvote',
