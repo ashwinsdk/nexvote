@@ -106,6 +106,25 @@ import { ToastService } from '../../services/toast.service';
               </p>
             }
           </section>
+
+          @if (canExtendVoting()) {
+            <section class="extend-section">
+              <h3 class="section-label">{{ i18n.t('proposal.extend.title') }}</h3>
+              <p class="extend-help">{{ i18n.t('proposal.extend.help') }}</p>
+              <div class="extend-controls">
+                <input
+                  type="number"
+                  class="nv-input extend-input"
+                  min="1"
+                  max="30"
+                  [(ngModel)]="extendDays"
+                />
+                <button class="nv-btn nv-btn-outline" (click)="extendDeadline()" [disabled]="extending">
+                  {{ extending ? i18n.t('proposal.extend.extending') : i18n.t('proposal.extend.button') }}
+                </button>
+              </div>
+            </section>
+          }
         }
 
         <!-- Results -->
@@ -429,6 +448,31 @@ import { ToastService } from '../../services/toast.service';
       font-weight: 700;
     }
 
+    .extend-section {
+      padding: var(--sp-2);
+      border: 2px solid var(--border);
+      border-radius: var(--r-sm);
+      margin-bottom: var(--sp-3);
+      background: var(--bg-muted);
+    }
+
+    .extend-help {
+      font-size: var(--fs-sm);
+      color: var(--muted);
+      margin-bottom: var(--sp-1);
+    }
+
+    .extend-controls {
+      display: flex;
+      gap: var(--sp-1);
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .extend-input {
+      width: 92px;
+    }
+
     /* ── Results ── */
     .results-section {
       padding: var(--sp-3);
@@ -629,6 +673,8 @@ export class ProposalDetailComponent implements OnInit {
   justVoted = '';
   newComment = '';
   submittingComment = false;
+  extendDays = 3;
+  extending = false;
 
   constructor(
     public auth: AuthService,
@@ -727,6 +773,40 @@ export class ProposalDetailComponent implements OnInit {
       },
       error: () => {
         this.submittingComment = false;
+      },
+    });
+  }
+
+  canExtendVoting(): boolean {
+    if (!this.proposal || !this.auth.isLoggedIn()) return false;
+    const user = this.auth.user();
+    if (!user || this.proposal.status !== 'voting') return false;
+
+    const isCreator = this.proposal.created_by === user.id;
+    const isAdmin = user.role === 'admin' || user.role === 'superadmin';
+    return isCreator || isAdmin;
+  }
+
+  extendDeadline(): void {
+    if (!this.proposal) return;
+    const days = Number(this.extendDays);
+    if (!Number.isInteger(days) || days < 1 || days > 30) {
+      this.toast.show('Enter a value between 1 and 30 days.');
+      return;
+    }
+
+    this.extending = true;
+    this.api.extendProposalDeadline(this.proposal.id, days).subscribe({
+      next: (res) => {
+        if (this.proposal) {
+          this.proposal.deadline = res.deadline;
+        }
+        this.toast.show(res.message);
+        this.extending = false;
+      },
+      error: (err) => {
+        this.toast.show(err.error?.error || 'Failed to extend voting deadline.');
+        this.extending = false;
       },
     });
   }

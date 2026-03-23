@@ -74,16 +74,24 @@ router.get('/:userId/profile', authMiddleware, async (req: Request, res: Respons
             .select(
                 'p.id',
                 'p.title',
+                'p.title_en',
+                'p.title_lang',
                 'p.text',
+                'p.text_en',
+                'p.text_lang',
                 'p.category',
                 'p.status',
                 'p.summary',
+                'p.summary_en',
+                'p.summary_lang',
                 'p.yes_count',
                 'p.no_count',
                 'p.abstain_count',
                 'p.created_at',
                 'p.deadline',
                 'c.name as community_name',
+                'c.name_en as community_name_en',
+                'c.name_lang as community_name_lang',
                 'c.slug as community_slug'
             )
             .leftJoin('communities as c', 'p.community_id', 'c.id')
@@ -111,11 +119,18 @@ router.get('/:userId/profile', authMiddleware, async (req: Request, res: Respons
                     originalLocale: proposal.summary_lang,
                     targetLocale: locale,
                 });
+                const communityName = await localizeField({
+                    english: proposal.community_name_en || proposal.community_name,
+                    original: proposal.community_name,
+                    originalLocale: proposal.community_name_lang,
+                    targetLocale: locale,
+                });
                 return {
                     ...proposal,
                     title,
                     text,
                     summary,
+                    community_name: communityName,
                 };
             })
         );

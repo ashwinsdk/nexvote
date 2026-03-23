@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
@@ -14,8 +14,13 @@ import { I18nService } from '../../services/i18n.service';
     <div class="nv-container">
       <div class="page-header">
         <h1 class="page-title">{{ i18n.t('admin.title') }}</h1>
-        <span class="region-tag">{{ regionCode }}</span>
+        <span class="region-tag">{{ regionCode || auth.user()?.regionCode || '-' }}</span>
+        <button class="nv-btn nv-btn-outline refresh-btn" (click)="refreshNow()" [disabled]="loading">
+          {{ i18n.t('admin.refresh') }}
+        </button>
+        <span class="live-pill">{{ i18n.t('admin.live') }}</span>
       </div>
+      <p class="updated-at">{{ i18n.t('admin.lastupdated') }} {{ lastUpdated | date:'shortTime' }}</p>
 
       @if (!auth.isAdmin()) {
         <div class="access-denied">
@@ -41,7 +46,7 @@ import { I18nService } from '../../services/i18n.service';
           </div>
         </div>
 
-        <h2 class="section-heading">{{ i18n.t('admin.active') }} ({{ regionCode }})</h2>
+        <h2 class="section-heading">{{ i18n.t('admin.active') }} ({{ regionCode || auth.user()?.regionCode || '-' }})</h2>
         @for (p of activeProposals; track p.id) {
           <div class="admin-card">
             <div class="admin-card-top">
@@ -51,10 +56,25 @@ import { I18nService } from '../../services/i18n.service';
             <div class="admin-card-meta">
               ▲ {{ p.yes_count }} · ▼ {{ p.no_count }} · — {{ p.abstain_count }}
               @if (p.deadline) { · {{ p.deadline | date:'shortDate' }} }
+              @if (p.deadline) { · {{ getDeadlineState(p.deadline) }} }
             </div>
             <div class="admin-card-actions">
               <button class="nv-btn nv-btn-primary" (click)="finalize(p.id)" [disabled]="finalizing">
                 {{ i18n.t('admin.finalize') }}
+              </button>
+              <input
+                type="number"
+                class="nv-input extend-days-input"
+                min="1"
+                max="30"
+                [value]="getExtendDays(p.id)"
+                (input)="setExtendDays(p.id, $event)"
+              />
+              <button class="nv-btn nv-btn-outline" (click)="extendVoting(p.id, getExtendDays(p.id))" [disabled]="finalizing">
+                {{ i18n.t('admin.extendcustom') }}
+              </button>
+              <button class="nv-btn nv-btn-outline" (click)="archiveProposal(p.id)" [disabled]="finalizing">
+                {{ i18n.t('admin.archive') }}
               </button>
             </div>
           </div>
@@ -75,6 +95,21 @@ import { I18nService } from '../../services/i18n.service';
                 <button class="nv-btn nv-btn-outline" (click)="markImplemented(p.id)" [disabled]="finalizing">
                   {{ i18n.t('admin.implement') }}
                 </button>
+                <button class="nv-btn nv-btn-outline" (click)="archiveProposal(p.id)" [disabled]="finalizing">
+                  {{ i18n.t('admin.archive') }}
+                </button>
+              </div>
+            } @else if (p.status === 'archived') {
+              <div class="admin-card-actions">
+                <button class="nv-btn nv-btn-outline" (click)="unarchiveProposal(p.id)" [disabled]="finalizing">
+                  {{ i18n.t('admin.unarchive') }}
+                </button>
+              </div>
+            } @else {
+              <div class="admin-card-actions">
+                <button class="nv-btn nv-btn-outline" (click)="archiveProposal(p.id)" [disabled]="finalizing">
+                  {{ i18n.t('admin.archive') }}
+                </button>
               </div>
             }
           </div>
@@ -89,6 +124,7 @@ import { I18nService } from '../../services/i18n.service';
           <div class="action-card">
             <div>
               <strong>{{ action.action_type }}</strong>
+              @if (action.admin_name) { ({{ action.admin_name }}) }
               @if (action.description) { — {{ action.description }} }
             </div>
             <span class="action-date">{{ action.created_at | date:'short' }}</span>
@@ -120,6 +156,27 @@ import { I18nService } from '../../services/i18n.service';
       border: 2px solid var(--border);
       border-radius: var(--r-sm);
       color: var(--muted);
+    }
+    .refresh-btn {
+      margin-left: auto;
+    }
+    .live-pill {
+      font-size: var(--fs-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 4px 10px;
+      border: 2px solid var(--success);
+      border-radius: var(--r-sm);
+      color: var(--success);
+      background: rgba(22,163,74,0.06);
+    }
+    .updated-at {
+      margin-top: -6px;
+      margin-bottom: var(--sp-3);
+      font-size: var(--fs-xs);
+      color: var(--muted);
+      text-align: right;
     }
     .access-denied {
       padding: var(--sp-6);
@@ -206,6 +263,11 @@ import { I18nService } from '../../services/i18n.service';
     .admin-card-actions {
       display: flex;
       gap: var(--sp-1);
+      flex-wrap: wrap;
+    }
+    .extend-days-input {
+      width: 84px;
+      min-height: 40px;
     }
     .status-msg {
       margin-top: var(--sp-2);
@@ -252,15 +314,28 @@ export class AdminDashboardComponent implements OnInit {
   donationStats = { totalDonations: 0, donationCount: 0 };
   civicScore = 0;
   finalizing = false;
+  loading = false;
   message = '';
+  lastUpdated = new Date();
+  extendDaysMap: Record<string, number> = {};
+  private refreshTimer: any = null;
 
   constructor(public auth: AuthService, private api: ApiService, public i18n: I18nService) { }
 
   ngOnInit(): void {
+    this.startAutoRefresh();
     this.loadDashboard();
   }
 
+  ngOnDestroy(): void {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+  }
+
   loadDashboard(): void {
+    this.loading = true;
     this.api.getAdminDashboard().subscribe({
       next: (data) => {
         this.regionCode = data.regionCode;
@@ -270,11 +345,42 @@ export class AdminDashboardComponent implements OnInit {
         this.recentActions = data.recentActions;
         this.donationStats = data.donationStats;
         this.civicScore = data.civicScore;
+        this.lastUpdated = new Date();
+        this.loading = false;
       },
       error: () => {
         this.message = 'Failed to load dashboard.';
+        this.loading = false;
       },
     });
+  }
+
+  refreshNow(): void {
+    this.loadDashboard();
+  }
+
+  private startAutoRefresh(): void {
+    this.refreshTimer = setInterval(() => {
+      this.loadDashboard();
+    }, 15000);
+  }
+
+  getDeadlineState(deadline: string): string {
+    const deadlineDate = new Date(deadline).getTime();
+    const now = Date.now();
+    const diff = deadlineDate - now;
+
+    if (diff <= 0) {
+      return 'ended';
+    }
+
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    if (hours < 24) {
+      return `${hours}h left`;
+    }
+
+    const days = Math.ceil(hours / 24);
+    return `${days}d left`;
   }
 
   finalize(proposalId: string): void {
@@ -288,6 +394,23 @@ export class AdminDashboardComponent implements OnInit {
       },
       error: (err) => {
         this.message = err.error?.error || 'Failed to finalize.';
+        this.finalizing = false;
+      },
+    });
+  }
+
+  extendVoting(proposalId: string, days: number): void {
+    const safeDays = Number.isInteger(days) ? Math.min(30, Math.max(1, days)) : 3;
+    this.finalizing = true;
+    this.message = '';
+    this.api.extendProposalDeadline(proposalId, safeDays, `Extended by admin for ${safeDays} day(s).`).subscribe({
+      next: (res) => {
+        this.message = res.message;
+        this.loadDashboard();
+        this.finalizing = false;
+      },
+      error: (err) => {
+        this.message = err.error?.error || 'Failed to extend deadline.';
         this.finalizing = false;
       },
     });
@@ -307,5 +430,46 @@ export class AdminDashboardComponent implements OnInit {
         this.finalizing = false;
       },
     });
+  }
+
+  archiveProposal(proposalId: string): void {
+    this.finalizing = true;
+    this.message = '';
+    this.api.updateProposalStatus(proposalId, 'archived', 'Archived by admin.').subscribe({
+      next: (res) => {
+        this.message = res.message;
+        this.loadDashboard();
+        this.finalizing = false;
+      },
+      error: (err) => {
+        this.message = err.error?.error || 'Failed to archive proposal.';
+        this.finalizing = false;
+      },
+    });
+  }
+
+  unarchiveProposal(proposalId: string): void {
+    this.finalizing = true;
+    this.message = '';
+    this.api.unarchiveProposal(proposalId).subscribe({
+      next: (res) => {
+        this.message = res.message;
+        this.loadDashboard();
+        this.finalizing = false;
+      },
+      error: (err) => {
+        this.message = err.error?.error || 'Failed to unarchive proposal.';
+        this.finalizing = false;
+      },
+    });
+  }
+
+  setExtendDays(proposalId: string, event: Event): void {
+    const value = Number((event.target as HTMLInputElement).value);
+    this.extendDaysMap[proposalId] = Number.isFinite(value) ? value : 3;
+  }
+
+  getExtendDays(proposalId: string): number {
+    return this.extendDaysMap[proposalId] ?? 3;
   }
 }

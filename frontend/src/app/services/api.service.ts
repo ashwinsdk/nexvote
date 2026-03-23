@@ -59,6 +59,29 @@ export interface VoteResponse {
     counts: { yes: number; no: number; abstain: number };
 }
 
+export interface NotificationItem {
+    id: string;
+    type: string;
+    title: string;
+    body: string;
+    entity_type: string | null;
+    entity_id: string | null;
+    read: boolean;
+    read_at: string | null;
+    created_at: string;
+}
+
+export interface NotificationSettings {
+    enabled: boolean;
+    emailEnabled: boolean;
+    chatEnabled: boolean;
+    proposalCreatedEnabled: boolean;
+    voteConfirmationEnabled: boolean;
+    voteReminderEnabled: boolean;
+    voteResultEnabled: boolean;
+    statusUpdateEnabled: boolean;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ApiService {
     private api = environment.apiUrl;
@@ -188,6 +211,21 @@ export class ApiService {
         });
     }
 
+    extendProposalDeadline(proposalId: string, days: number, reason?: string): Observable<{
+        message: string;
+        proposalId: string;
+        deadline: string;
+    }> {
+        return this.http.post<{
+            message: string;
+            proposalId: string;
+            deadline: string;
+        }>(`${this.api}/proposals/${proposalId}/extend-deadline`, {
+            days,
+            reason,
+        });
+    }
+
     // ── Admin ─────────────────────────────────────────────────────────────
 
     getUserProfile(userId: string): Observable<any> {
@@ -223,11 +261,57 @@ export class ApiService {
         });
     }
 
+    unarchiveProposal(proposalId: string): Observable<any> {
+        return this.http.post<any>(`${this.api}/admin/unarchive`, { proposalId });
+    }
+
     getAuditLog(page?: number): Observable<{ logs: any[] }> {
         let httpParams = new HttpParams();
         if (page) httpParams = httpParams.set('page', page.toString());
         return this.http.get<{ logs: any[] }>(`${this.api}/admin/audit-log`, {
             params: httpParams,
         });
+    }
+
+    getNotifications(params?: {
+        page?: number;
+        limit?: number;
+        unreadOnly?: boolean;
+    }): Observable<{ notifications: NotificationItem[]; unreadCount: number; total: number; page: number; limit: number }> {
+        let httpParams = new HttpParams();
+        if (params?.page) httpParams = httpParams.set('page', params.page.toString());
+        if (params?.limit) httpParams = httpParams.set('limit', params.limit.toString());
+        if (params?.unreadOnly !== undefined) httpParams = httpParams.set('unreadOnly', String(params.unreadOnly));
+
+        return this.http.get<{ notifications: NotificationItem[]; unreadCount: number; total: number; page: number; limit: number }>(
+            `${this.api}/notifications`,
+            { params: httpParams }
+        );
+    }
+
+    markNotificationRead(id: string): Observable<{ message: string }> {
+        return this.http.patch<{ message: string }>(`${this.api}/notifications/${id}/read`, {});
+    }
+
+    markAllNotificationsRead(): Observable<{ message: string }> {
+        return this.http.post<{ message: string }>(`${this.api}/notifications/read-all`, {});
+    }
+
+    getNotificationSettings(): Observable<NotificationSettings> {
+        return this.http.get<NotificationSettings>(`${this.api}/notifications/settings`);
+    }
+
+    updateNotificationSettings(payload: Partial<NotificationSettings>): Observable<{ message: string }> {
+        return this.http.put<{ message: string }>(`${this.api}/notifications/settings`, payload);
+    }
+
+    getCommunityNotificationSettings(): Observable<{ communities: Array<{ id: string; name: string; slug: string; enabled: boolean }> }> {
+        return this.http.get<{ communities: Array<{ id: string; name: string; slug: string; enabled: boolean }> }>(
+            `${this.api}/notifications/settings/communities`
+        );
+    }
+
+    updateCommunityNotificationSetting(communityId: string, enabled: boolean): Observable<{ message: string }> {
+        return this.http.put<{ message: string }>(`${this.api}/notifications/settings/communities/${communityId}`, { enabled });
     }
 }

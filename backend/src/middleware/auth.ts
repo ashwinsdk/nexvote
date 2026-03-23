@@ -8,6 +8,8 @@ export interface AuthPayload {
     email: string;
     role: string;
     regionCode: string;
+    user_id?: string;
+    region_code?: string;
 }
 
 declare global {
@@ -33,7 +35,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 
     try {
         const payload = jwt.verify(token, config.jwtSecret) as AuthPayload;
-        req.user = payload;
+        req.user = {
+            userId: payload.userId || payload.user_id || '',
+            email: payload.email,
+            role: payload.role,
+            regionCode: payload.regionCode || payload.region_code || '',
+        };
         next();
     } catch (err) {
         logger.warn({ err }, 'JWT verification failed');

@@ -28,6 +28,34 @@ const loadFranc = async () => {
     return francModule.franc;
 };
 
+let googleTranslateFn: any = null;
+const fallbackWarnTracker = new Map<string, number>();
+const loadGoogleTranslate = async () => {
+    if (!googleTranslateFn) {
+        const mod: any = await import('@vitalets/google-translate-api');
+        googleTranslateFn = mod.translate || mod.default || mod;
+    }
+    return googleTranslateFn;
+};
+
+const fallbackTranslate = async (
+    text: string,
+    source: Locale,
+    target: Locale
+): Promise<string> => {
+    try {
+        const translate = await loadGoogleTranslate();
+        const result = await translate(text, { from: source, to: target });
+        const translatedText = result?.text;
+        return typeof translatedText === 'string' && translatedText.trim().length > 0
+            ? translatedText
+            : text;
+    } catch (err) {
+        logger.warn({ err, source, target }, 'Fallback translation failed, returning original text');
+        return text;
+    }
+};
+
 export const normalizeLocale = (value?: string | null): Locale => {
     const trimmed = (value || '').toLowerCase().trim();
     if (SUPPORTED_LOCALES.includes(trimmed as Locale)) {
@@ -75,8 +103,26 @@ export const translateText = async (
         translationCache.set(key, translation);
         return translation;
     } catch (err) {
-        logger.warn({ err, source, target }, 'Translation failed, returning original text');
-        return text;
+        const warnKey = `${source}->${target}`;
+        const now = Date.now();
+        const lastWarnAt = fallbackWarnTracker.get(warnKey) || 0;
+        if (now - lastWarnAt > 60_000) {
+            fallbackWarnTracker.set(warnKey, now);
+            logger.debug(
+                { source, target, message: (err as Error)?.message },
+                'Primary translation failed, using fallback provider'
+            );
+        } else {
+            logger.debug({ source, target }, 'Primary translation failed, using fallback provider');
+        }
+        const translated = await fallbackTranslate(text, source, target);
+        if (translated !== text) {
+            if (translationCache.size >= MAX_CACHE_ENTRIES) {
+                translationCache.clear();
+            }
+            translationCache.set(key, translated);
+        }
+        return translated;
     }
 };
 

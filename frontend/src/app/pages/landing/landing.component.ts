@@ -133,7 +133,10 @@ import { I18nService } from '../../services/i18n.service';
                     </a>
                     <div class="cta-notice">
                         <nv-icon name="alert" [size]="16"></nv-icon>
-                        <span><strong>{{ i18n.t('cta.notice') }}</strong> {{ i18n.t('cta.notice.text') }}</span>
+                        <span class="cta-notice-copy">
+                            <strong class="cta-notice-title">{{ i18n.t('cta.notice') }}</strong>
+                            <span>{{ i18n.t('cta.notice.text') }}</span>
+                        </span>
                     </div>
                 </div>
             </section>
@@ -398,18 +401,35 @@ import { I18nService } from '../../services/i18n.service';
             margin-top: var(--sp-4);
             font-size: var(--fs-xs);
             color: var(--muted);
-            display: inline-flex;
+            display: flex;
             align-items: flex-start;
             gap: 8px;
             text-align: left;
             padding: var(--sp-2);
             border: 2px solid var(--warning);
             border-radius: var(--r-sm);
-            max-width: 480px;
+            width: min(720px, 100%);
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .cta-notice nv-icon {
+            margin-top: 2px;
+            flex-shrink: 0;
         }
 
         .cta-notice strong {
             color: var(--warning);
+        }
+
+        .cta-notice-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .cta-notice-title {
+            display: block;
         }
 
         /* ── Mobile ── */

@@ -10,9 +10,11 @@ import communityRoutes from './routes/communities';
 import proposalRoutes from './routes/proposals';
 import adminRoutes from './routes/admin';
 import userRoutes from './routes/users';
+import notificationRoutes from './routes/notifications';
 import { aiService } from './services/ai';
 import { relayerService } from './services/relayer';
 import { localeMiddleware } from './middleware/locale';
+import { notificationService } from './services/notifications';
 
 const app = express();
 
@@ -52,6 +54,7 @@ app.use('/api/communities', communityRoutes);
 app.use('/api/proposals', proposalRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // ── Health check ─────────────────────────────────────────────────────────────
 
@@ -82,6 +85,13 @@ if (require.main === module) {
     app.listen(config.port, () => {
         logger.info({ port: config.port, env: config.nodeEnv }, 'NexVote backend started');
     });
+
+    // Periodic reminder sweep in long-running environments.
+    if (!process.env.VERCEL) {
+        setInterval(() => {
+            notificationService.safeReminderSweep();
+        }, 60 * 1000);
+    }
 }
 
 export default app;

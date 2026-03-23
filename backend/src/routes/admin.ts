@@ -6,11 +6,65 @@ import logger from '../logger';
 import { authMiddleware, requireRole } from '../middleware/auth';
 import { relayerService } from '../services/relayer';
 import { localizeField, normalizeLocale } from '../services/translation';
+import { finalizeExpiredProposals, finalizeForAdmin } from '../services/votingLifecycle';
+import { notificationService } from '../services/notifications';
 
 const router = Router();
 
 const normalizeRegionCode = (value?: string): string =>
     (value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const regionVariants = (value?: string): string[] => {
+    const raw = (value || '').trim();
+    const normalized = normalizeRegionCode(raw);
+    if (!normalized) {
+        return [];
+    }
+
+    const variants = new Set<string>([normalized]);
+    const segments = raw
+        .split(/[-_\s]+/g)
+        .map((part) => part.trim())
+        .filter(Boolean);
+
+    if (segments.length >= 2) {
+        variants.add(normalizeRegionCode(segments.slice(-2).join('')));
+    }
+    if (segments.length >= 3) {
+        variants.add(normalizeRegionCode(segments.slice(-3).join('')));
+    }
+
+    return Array.from(variants).filter(Boolean);
+};
+
+const applyNormalizedRegionFilter = (
+    query: any,
+    column: string,
+    variants: string[]
+) => {
+    if (!variants.length) {
+        return query;
+    }
+
+    query.where((qb: any) => {
+        for (let i = 0; i < variants.length; i += 1) {
+            const variant = variants[i];
+            if (i === 0) {
+                qb.whereRaw(
+                    `regexp_replace(LOWER(${column}), '[^a-z0-9]', '', 'g') = ?`,
+                    [variant]
+                );
+            } else {
+                qb.orWhereRaw(
+                    `regexp_replace(LOWER(${column}), '[^a-z0-9]', '', 'g') = ?`,
+                    [variant]
+                );
+            }
+        }
+    });
+
+    return query;
+};
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
@@ -28,28 +82,36 @@ router.get(
     requireRole('admin', 'superadmin'),
     async (req: Request, res: Response) => {
         try {
+            await finalizeExpiredProposals();
+
             const locale = normalizeLocale(req.locale);
-            const regionCode = req.user!.regionCode;
-            const regionNormalized = normalizeRegionCode(regionCode);
+            const userRecord = await db('users')
+                .select('region_code')
+                .where({ id: req.user!.userId })
+                .first();
+            const regionCode = userRecord?.region_code || req.user!.regionCode || '';
+            const regionCodeOptions = regionVariants(regionCode);
 
             // Active proposals in the admin's region
-            const activeProposals = await db('proposals')
-                .whereRaw('LOWER(region_code) = ?', [regionNormalized])
+            const activeQuery = db('proposals');
+            applyNormalizedRegionFilter(activeQuery, 'region_code', regionCodeOptions);
+            const activeProposals = await activeQuery
                 .whereIn('status', ['voting', 'active'])
                 .orderBy('created_at', 'desc')
                 .limit(50);
 
             // Finalized proposals
-            const finalizedProposals = await db('proposals')
-                .whereRaw('LOWER(region_code) = ?', [regionNormalized])
-                .whereIn('status', ['passed', 'failed', 'implemented'])
+            const finalizedQuery = db('proposals');
+            applyNormalizedRegionFilter(finalizedQuery, 'region_code', regionCodeOptions);
+            const finalizedProposals = await finalizedQuery
+                .whereIn('status', ['passed', 'failed', 'implemented', 'archived'])
                 .orderBy('finalized_at', 'desc')
                 .limit(50);
 
             // Communities in region
-            const communities = await db('communities')
-                .whereRaw('LOWER(region_code) = ?', [regionNormalized])
-                .select('*');
+            const communitiesQuery = db('communities').select('*');
+            applyNormalizedRegionFilter(communitiesQuery, 'region_code', regionCodeOptions);
+            const communities = await communitiesQuery;
 
             const localizedActive = await Promise.all(
                 activeProposals.map(async (proposal: any) => ({
@@ -106,15 +168,34 @@ router.get(
             );
 
             // Recent admin actions
-            const recentActions = await db('admin_actions')
-                .where({ admin_id: req.user!.userId })
+            const recentActionsQuery = db('admin_actions as aa')
+                .leftJoin('proposals as p', 'aa.proposal_id', 'p.id')
+                .leftJoin('communities as c', 'aa.community_id', 'c.id')
+                .leftJoin('users as u', 'aa.admin_id', 'u.id')
+                .select(
+                    'aa.*',
+                    'u.display_name as admin_name',
+                    'p.title as proposal_title',
+                    'c.name as community_name'
+                )
+                .where(function () {
+                    this.where('aa.admin_id', req.user!.userId);
+                    for (const variant of regionCodeOptions) {
+                        this.orWhereRaw(
+                            "regexp_replace(LOWER(COALESCE(p.region_code, c.region_code, '')), '[^a-z0-9]', '', 'g') = ?",
+                            [variant]
+                        );
+                    }
+                })
                 .orderBy('created_at', 'desc')
                 .limit(20);
+            const recentActions = await recentActionsQuery;
 
             // Donation totals
-            const [donationStats] = await db('donations')
-                .join('proposals', 'donations.proposal_id', 'proposals.id')
-                .whereRaw('LOWER(proposals.region_code) = ?', [regionNormalized])
+            const donationsQuery = db('donations')
+                .join('proposals', 'donations.proposal_id', 'proposals.id');
+            applyNormalizedRegionFilter(donationsQuery, 'proposals.region_code', regionCodeOptions);
+            const [donationStats] = await donationsQuery
                 .where('donations.status', 'completed')
                 .select(
                     db.raw('COALESCE(SUM(donations.amount), 0) as total_donations'),
@@ -137,7 +218,7 @@ router.get(
             );
 
             res.json({
-                regionCode,
+                regionCode: regionCode || req.user!.regionCode || null,
                 activeProposals: localizedActive,
                 finalizedProposals: localizedFinalized,
                 communities: localizedCommunities,
@@ -183,72 +264,14 @@ router.post(
                 return;
             }
 
-            // Determine outcome (51% majority of cast votes)
-            const totalVotes = proposal.yes_count + proposal.no_count + proposal.abstain_count;
-            const passed = totalVotes > 0 && proposal.yes_count / totalVotes > 0.51;
-            const finalStatus = passed ? 'passed' : 'failed';
-
-            // Generate result hash
-            const resultData = JSON.stringify({
-                proposalId: proposal.id,
-                yesCount: proposal.yes_count,
-                noCount: proposal.no_count,
-                abstainCount: proposal.abstain_count,
-                status: finalStatus,
-                finalizedBy: req.user!.userId,
-                finalizedAt: new Date().toISOString(),
-            });
-            const resultHash = '0x' + crypto.createHash('sha256').update(resultData).digest('hex');
-
-            // Update proposal
-            await db('proposals').where({ id: proposalId }).update({
-                status: finalStatus,
-                result_hash: resultHash,
-                finalized_at: new Date(),
-                updated_at: new Date(),
-            });
-
-            // Record admin action
-            await db('admin_actions').insert({
-                admin_id: req.user!.userId,
-                proposal_id: proposalId,
-                action_type: 'finalize_vote',
-                description: `Proposal ${finalStatus}. Yes: ${proposal.yes_count}, No: ${proposal.no_count}, Abstain: ${proposal.abstain_count}.`,
-                status_hash: resultHash,
-            });
-
-            // Submit to blockchain via relayer
-            let txHash: string | null = null;
-            try {
-                txHash = await relayerService.finalizeVote(proposalId, resultHash);
-                if (txHash) {
-                    await db('proposals').where({ id: proposalId }).update({ tx_hash: txHash });
-                }
-            } catch (relayErr) {
-                logger.error({ err: relayErr }, 'Relayer failed to finalize on-chain');
-            }
-
-            // Audit log
-            await db('audit_log').insert({
-                event_type: 'vote_finalized',
-                reference_id: proposalId,
-                reference_table: 'proposals',
-                actor_id: req.user!.userId,
-                hash_onchain: resultHash,
-                tx_hash: txHash,
-                details: {
-                    result: finalStatus,
-                    yesCount: proposal.yes_count,
-                    noCount: proposal.no_count,
-                },
-            });
+            const finalized = await finalizeForAdmin(proposal, req.user!.userId);
 
             res.json({
-                message: `Proposal ${finalStatus}.`,
+                message: `Proposal ${finalized.status}.`,
                 proposalId,
-                status: finalStatus,
-                resultHash,
-                txHash,
+                status: finalized.status,
+                resultHash: finalized.resultHash,
+                txHash: finalized.txHash,
                 counts: {
                     yes: proposal.yes_count,
                     no: proposal.no_count,
@@ -278,7 +301,9 @@ router.post(
                 return;
             }
 
-            if (proposal.region_code !== req.user!.regionCode) {
+            const regionMatch =
+                normalizeRegionCode(proposal.region_code) === normalizeRegionCode(req.user!.regionCode);
+            if (!regionMatch) {
                 res.status(403).json({ error: 'Region mismatch.' });
                 return;
             }
@@ -292,9 +317,16 @@ router.post(
             });
             const statusHash = '0x' + crypto.createHash('sha256').update(statusData).digest('hex');
 
-            await db('proposals').where({ id: body.proposalId }).update({
+            const updatePayload: Record<string, any> = {
                 status: body.status,
                 updated_at: new Date(),
+            };
+            if (body.status === 'archived') {
+                updatePayload.archived_from_status = proposal.status;
+            }
+
+            await db('proposals').where({ id: body.proposalId }).update({
+                ...updatePayload,
             });
 
             await db('admin_actions').insert({
@@ -303,6 +335,10 @@ router.post(
                 action_type: 'status_update',
                 description: body.description || `Status updated to ${body.status}.`,
                 status_hash: statusHash,
+                metadata: {
+                    previousStatus: proposal.status,
+                    newStatus: body.status,
+                },
             });
 
             // Submit admin update on-chain
@@ -323,6 +359,16 @@ router.post(
                 details: { newStatus: body.status, description: body.description },
             });
 
+            await notificationService
+                .notifyStatusUpdate({
+                    proposalId: body.proposalId,
+                    title: proposal.title_en || proposal.title,
+                    status: body.status,
+                    communityId: proposal.community_id,
+                    actorId: req.user!.userId,
+                })
+                .catch(() => undefined);
+
             res.json({
                 message: `Proposal status updated to ${body.status}.`,
                 proposalId: body.proposalId,
@@ -336,6 +382,79 @@ router.post(
             }
             logger.error({ err }, 'Failed to update proposal status');
             res.status(500).json({ error: 'Failed to update status.' });
+        }
+    }
+);
+
+// ── POST /api/admin/unarchive ───────────────────────────────────────────────
+
+router.post(
+    '/unarchive',
+    authMiddleware,
+    requireRole('admin', 'superadmin'),
+    async (req: Request, res: Response) => {
+        try {
+            const { proposalId } = req.body;
+            if (!proposalId || typeof proposalId !== 'string') {
+                res.status(400).json({ error: 'proposalId is required.' });
+                return;
+            }
+
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const regionMatch =
+                normalizeRegionCode(proposal.region_code) === normalizeRegionCode(req.user!.regionCode);
+            if (!regionMatch) {
+                res.status(403).json({ error: 'Region mismatch.' });
+                return;
+            }
+
+            if (proposal.status !== 'archived') {
+                res.status(400).json({ error: 'Only archived proposals can be unarchived.' });
+                return;
+            }
+
+            let restoredStatus = proposal.archived_from_status;
+            if (!restoredStatus) {
+                const totalVotes = (proposal.yes_count || 0) + (proposal.no_count || 0) + (proposal.abstain_count || 0);
+                const passed = totalVotes > 0 && proposal.yes_count / totalVotes > 0.51;
+                restoredStatus = proposal.result_hash ? (passed ? 'passed' : 'failed') : 'voting';
+            }
+
+            await db('proposals').where({ id: proposalId }).update({
+                status: restoredStatus,
+                updated_at: new Date(),
+            });
+
+            await db('admin_actions').insert({
+                admin_id: req.user!.userId,
+                proposal_id: proposalId,
+                action_type: 'unarchive',
+                description: `Proposal unarchived to ${restoredStatus}.`,
+                metadata: {
+                    previousStatus: 'archived',
+                    restoredStatus,
+                },
+            });
+
+            await notificationService
+                .notifyStatusUpdate({
+                    proposalId,
+                    title: proposal.title_en || proposal.title,
+                    status: restoredStatus,
+                    communityId: proposal.community_id,
+                    actorId: req.user!.userId,
+                })
+                .catch(() => undefined);
+
+            res.json({ message: `Proposal restored to ${restoredStatus}.`, proposalId, status: restoredStatus });
+        } catch (err) {
+            logger.error({ err }, 'Failed to unarchive proposal');
+            res.status(500).json({ error: 'Failed to unarchive proposal.' });
         }
     }
 );

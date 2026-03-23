@@ -60,7 +60,7 @@ import { I18nService } from '../../services/i18n.service';
                 }
               </div>
               <p class="card-desc">
-                {{ community.description || 'No description provided.' }}
+                {{ community.description || '' }}
               </p>
               <div class="card-meta">
                 <span class="badge-cat">{{ community.category }}</span>

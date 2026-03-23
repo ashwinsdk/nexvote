@@ -13,6 +13,11 @@ import {
     translateText,
 } from '../services/translation';
 import { relayerService } from '../services/relayer';
+import {
+    finalizeExpiredProposals,
+    finalizeIfExpired,
+} from '../services/votingLifecycle';
+import { notificationService } from '../services/notifications';
 
 const router = Router();
 
@@ -40,10 +45,18 @@ const voteSchema = z.object({
         .optional(),
 });
 
+const extendDeadlineSchema = z.object({
+    days: z.number().int().min(1).max(30),
+    reason: z.string().max(500).optional(),
+});
+
 // ── GET /api/proposals ──────────────────────────────────────────────────────
 
 router.get('/', async (req: Request, res: Response) => {
     try {
+        await finalizeExpiredProposals();
+        await notificationService.safeReminderSweep();
+
         const locale = normalizeLocale(req.locale);
         const {
             communityId,
@@ -62,6 +75,8 @@ router.get('/', async (req: Request, res: Response) => {
             .select(
                 'proposals.*',
                 'communities.name as community_name',
+                'communities.name_en as community_name_en',
+                'communities.name_lang as community_name_lang',
                 'communities.slug as community_slug',
                 'users.display_name as author_name',
                 'users.id as author_id'
@@ -115,11 +130,18 @@ router.get('/', async (req: Request, res: Response) => {
                     originalLocale: proposal.summary_lang,
                     targetLocale: locale,
                 });
+                const communityName = await localizeField({
+                    english: proposal.community_name_en || proposal.community_name,
+                    original: proposal.community_name,
+                    originalLocale: proposal.community_name_lang,
+                    targetLocale: locale,
+                });
                 return {
                     ...proposal,
                     title,
                     text,
                     summary,
+                    community_name: communityName,
                 };
             })
         );
@@ -135,6 +157,9 @@ router.get('/', async (req: Request, res: Response) => {
 
 router.get('/eligible', authMiddleware, async (req: Request, res: Response) => {
     try {
+        await finalizeExpiredProposals();
+        await notificationService.safeReminderSweep();
+
         const locale = normalizeLocale(req.locale);
         const { sort = 'hot', page = '1', limit = '20' } = req.query;
         const offset = (parseInt(page as string, 10) - 1) * parseInt(limit as string, 10);
@@ -153,13 +178,15 @@ router.get('/eligible', authMiddleware, async (req: Request, res: Response) => {
             .select(
                 'proposals.*',
                 'communities.name as community_name',
+                'communities.name_en as community_name_en',
+                'communities.name_lang as community_name_lang',
                 'communities.slug as community_slug',
                 'users.display_name as author_name',
                 'users.id as author_id'
             )
             .where(function () {
                 this.whereRaw(
-                    "LOWER(regexp_replace(communities.region_code, '[^a-z0-9]', '', 'g')) = ?",
+                    "regexp_replace(LOWER(communities.region_code), '[^a-z0-9]', '', 'g') = ?",
                     [region]
                 )
                     .orWhereNotNull('cm.user_id');
@@ -207,11 +234,18 @@ router.get('/eligible', authMiddleware, async (req: Request, res: Response) => {
                     originalLocale: proposal.summary_lang,
                     targetLocale: locale,
                 });
+                const communityName = await localizeField({
+                    english: proposal.community_name_en || proposal.community_name,
+                    original: proposal.community_name,
+                    originalLocale: proposal.community_name_lang,
+                    targetLocale: locale,
+                });
                 return {
                     ...proposal,
                     title,
                     text,
                     summary,
+                    community_name: communityName,
                 };
             })
         );
@@ -227,6 +261,9 @@ router.get('/eligible', authMiddleware, async (req: Request, res: Response) => {
 
 router.get('/:id', async (req: Request, res: Response) => {
     try {
+        const proposalId = String(req.params.id);
+        await finalizeIfExpired(proposalId);
+
         const locale = normalizeLocale(req.locale);
         const proposal = await db('proposals')
             .join('communities', 'proposals.community_id', 'communities.id')
@@ -234,11 +271,13 @@ router.get('/:id', async (req: Request, res: Response) => {
             .select(
                 'proposals.*',
                 'communities.name as community_name',
+                'communities.name_en as community_name_en',
+                'communities.name_lang as community_name_lang',
                 'communities.slug as community_slug',
                 'users.display_name as author_name',
                 'users.id as author_id'
             )
-            .where('proposals.id', req.params.id)
+            .where('proposals.id', proposalId)
             .first();
 
         if (!proposal) {
@@ -250,7 +289,7 @@ router.get('/:id', async (req: Request, res: Response) => {
         const comments = await db('comments')
             .join('users', 'comments.user_id', 'users.id')
             .select('comments.*', 'users.display_name as author_name')
-            .where({ proposal_id: req.params.id, removed: false })
+            .where({ proposal_id: proposalId, removed: false })
             .orderBy('comments.created_at', 'asc');
 
         const localizedProposal = {
@@ -271,6 +310,12 @@ router.get('/:id', async (req: Request, res: Response) => {
                 english: proposal.summary_en || proposal.summary,
                 original: proposal.summary,
                 originalLocale: proposal.summary_lang,
+                targetLocale: locale,
+            }),
+            community_name: await localizeField({
+                english: proposal.community_name_en || proposal.community_name,
+                original: proposal.community_name,
+                originalLocale: proposal.community_name_lang,
                 targetLocale: locale,
             }),
         };
@@ -460,6 +505,16 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
             details: { title: body.title, communityId: body.communityId },
         });
 
+        await notificationService.notifyProposalCreated({
+            proposalId: proposal.id,
+            communityId: community.id,
+            communityName: community.name,
+            category: body.category,
+            deadline: deadline.toISOString(),
+            title: body.title,
+            actorId: req.user!.userId,
+        });
+
         res.status(201).json({
             ...proposal,
             title: await localizeField({
@@ -496,7 +551,9 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 router.post('/:id/vote', authMiddleware, async (req: Request, res: Response) => {
     try {
         const body = voteSchema.parse(req.body);
-        const proposalId = req.params.id;
+        const proposalId = String(req.params.id);
+
+        await finalizeIfExpired(proposalId);
 
         const proposal = await db('proposals').where({ id: proposalId }).first();
         if (!proposal) {
@@ -568,6 +625,15 @@ router.post('/:id/vote', authMiddleware, async (req: Request, res: Response) => 
             .select('yes_count', 'no_count', 'abstain_count')
             .first();
 
+        await notificationService
+            .notifyVoteConfirmation({
+                userId: req.user!.userId,
+                proposalId,
+                proposalTitle: proposal.title_en || proposal.title,
+                choice: body.choice,
+            })
+            .catch(() => undefined);
+
         res.json({
             message: existingVote ? 'Vote updated.' : 'Vote recorded.',
             choice: body.choice,
@@ -591,7 +657,9 @@ router.post('/:id/vote', authMiddleware, async (req: Request, res: Response) => 
 
 router.delete('/:id/vote', authMiddleware, async (req: Request, res: Response) => {
     try {
-        const proposalId = req.params.id;
+        const proposalId = String(req.params.id);
+
+        await finalizeIfExpired(proposalId);
 
         const proposal = await db('proposals').where({ id: proposalId }).first();
         if (!proposal) {
@@ -650,7 +718,10 @@ router.post('/:id/comment', authMiddleware, async (req: Request, res: Response) 
             return;
         }
 
-        const proposal = await db('proposals').where({ id: req.params.id }).first();
+        const proposalId = String(req.params.id);
+        await finalizeIfExpired(proposalId);
+
+        const proposal = await db('proposals').where({ id: proposalId }).first();
         if (!proposal) {
             res.status(404).json({ error: 'Proposal not found.' });
             return;
@@ -669,7 +740,7 @@ router.post('/:id/comment', authMiddleware, async (req: Request, res: Response) 
 
         const [comment] = await db('comments')
             .insert({
-                proposal_id: req.params.id,
+                proposal_id: proposalId,
                 user_id: req.user!.userId,
                 parent_id: parentId || null,
                 body: commentBody,
@@ -690,6 +761,80 @@ router.post('/:id/comment', authMiddleware, async (req: Request, res: Response) 
     } catch (err) {
         logger.error({ err }, 'Failed to add comment');
         res.status(500).json({ error: 'Failed to add comment.' });
+    }
+});
+
+// ── POST /api/proposals/:id/extend-deadline ────────────────────────────────
+
+router.post('/:id/extend-deadline', authMiddleware, async (req: Request, res: Response) => {
+    try {
+        const body = extendDeadlineSchema.parse(req.body);
+        const proposalId = String(req.params.id);
+
+        await finalizeIfExpired(proposalId);
+
+        const proposal = await db('proposals').where({ id: proposalId }).first();
+        if (!proposal) {
+            res.status(404).json({ error: 'Proposal not found.' });
+            return;
+        }
+
+        if (proposal.status !== 'voting') {
+            res.status(400).json({ error: 'Only voting proposals can be extended.' });
+            return;
+        }
+
+        const isCreator = proposal.created_by === req.user!.userId;
+        const isAdmin = req.user!.role === 'admin' || req.user!.role === 'superadmin';
+        if (!isCreator && !isAdmin) {
+            res.status(403).json({ error: 'Only the proposal creator or admin can extend deadline.' });
+            return;
+        }
+
+        const currentDeadline = proposal.deadline ? new Date(proposal.deadline) : new Date();
+        const newDeadline = new Date(currentDeadline);
+        newDeadline.setDate(newDeadline.getDate() + body.days);
+
+        await db('proposals').where({ id: proposalId }).update({
+            deadline: newDeadline,
+            updated_at: new Date(),
+        });
+
+        if (isAdmin) {
+            await db('admin_actions').insert({
+                admin_id: req.user!.userId,
+                proposal_id: proposalId,
+                action_type: 'extend_deadline',
+                description: body.reason || `Extended voting deadline by ${body.days} day(s).`,
+            });
+        }
+
+        await db('audit_log').insert({
+            event_type: 'proposal_deadline_extended',
+            reference_id: proposalId,
+            reference_table: 'proposals',
+            actor_id: req.user!.userId,
+            details: {
+                daysExtended: body.days,
+                oldDeadline: proposal.deadline,
+                newDeadline,
+                reason: body.reason || null,
+                extendedByRole: req.user!.role,
+            },
+        });
+
+        res.json({
+            message: `Voting deadline extended by ${body.days} day(s).`,
+            proposalId,
+            deadline: newDeadline,
+        });
+    } catch (err) {
+        if (err instanceof z.ZodError) {
+            res.status(400).json({ error: 'Validation failed.', details: err.errors });
+            return;
+        }
+        logger.error({ err }, 'Failed to extend proposal deadline');
+        res.status(500).json({ error: 'Failed to extend proposal deadline.' });
     }
 });
 

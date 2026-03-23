@@ -6,22 +6,22 @@ import { AuthService } from '../../services/auth.service';
 import { I18nService } from '../../services/i18n.service';
 
 interface UserProfile {
-    id: string;
-    displayName: string;
-    regionCode: string;
-    role: string;
-    createdAt: string;
-    proposalsCreated: number;
-    votesCast: number;
-    communitiesJoined: number;
-    proposals?: any[];
+  id: string;
+  displayName: string;
+  regionCode: string;
+  role: string;
+  createdAt: string;
+  proposalsCreated: number;
+  votesCast: number;
+  communitiesJoined: number;
+  proposals?: any[];
 }
 
 @Component({
-    selector: 'nv-user-profile',
-    standalone: true,
-    imports: [CommonModule, RouterLink],
-    template: `
+  selector: 'nv-user-profile',
+  standalone: true,
+  imports: [CommonModule, RouterLink],
+  template: `
     <div class="nv-container">
       @if (loading) {
         <div class="skeleton-profile">
@@ -90,8 +90,8 @@ interface UserProfile {
                 <p class="proposal-excerpt">{{ proposal.summary || (proposal.text | slice:0:120) + '...' }}</p>
                 <div class="proposal-footer">
                   <div class="vote-counts">
-                    <span class="vote-yes">{{ proposal.yes_count }} Yes</span>
-                    <span class="vote-no">{{ proposal.no_count }} No</span>
+                    <span class="vote-yes">{{ proposal.yes_count }} {{ i18n.t('proposal.vote.yes') }}</span>
+                    <span class="vote-no">{{ proposal.no_count }} {{ i18n.t('proposal.vote.no') }}</span>
                   </div>
                   <span class="badge" [attr.data-status]="proposal.status">{{ proposal.status }}</span>
                 </div>
@@ -108,7 +108,7 @@ interface UserProfile {
       }
     </div>
   `,
-    styles: [`
+  styles: [`
     /* Skeleton */
     .skeleton-profile { display:flex; gap:var(--sp-2); align-items:center; padding:var(--sp-3) 0; }
     .skeleton-avatar { width:80px; height:80px; border-radius:var(--r-sm); background:var(--surface-alt); }
@@ -164,41 +164,41 @@ interface UserProfile {
   `],
 })
 export class UserProfileComponent implements OnInit {
-    profile: UserProfile | null = null;
-    loading = true;
-    error = '';
+  profile: UserProfile | null = null;
+  loading = true;
+  error = '';
 
-    constructor(
-        public auth: AuthService,
-        private api: ApiService,
-        private route: ActivatedRoute,
-        public i18n: I18nService
-    ) { }
+  constructor(
+    public auth: AuthService,
+    private api: ApiService,
+    private route: ActivatedRoute,
+    public i18n: I18nService
+  ) { }
 
-    ngOnInit(): void {
-        const userId = this.route.snapshot.paramMap.get('id')!;
-        this.loadProfile(userId);
-    }
+  ngOnInit(): void {
+    const userId = this.route.snapshot.paramMap.get('id')!;
+    this.loadProfile(userId);
+  }
 
-    loadProfile(userId: string): void {
-        this.api.getUserProfile(userId).subscribe({
-            next: (profile) => {
-                this.profile = profile;
-                this.loading = false;
-            },
-            error: (err) => {
-                this.error = err.error?.error || 'Failed to load user profile.';
-                this.loading = false;
-            },
-        });
-    }
+  loadProfile(userId: string): void {
+    this.api.getUserProfile(userId).subscribe({
+      next: (profile) => {
+        this.profile = profile;
+        this.loading = false;
+      },
+      error: (err) => {
+        this.error = err.error?.error || 'Failed to load user profile.';
+        this.loading = false;
+      },
+    });
+  }
 
-    getInitial(): string {
-        if (!this.profile?.displayName) return '?';
-        return this.profile.displayName.charAt(0).toUpperCase();
-    }
+  getInitial(): string {
+    if (!this.profile?.displayName) return '?';
+    return this.profile.displayName.charAt(0).toUpperCase();
+  }
 
-    isOwnProfile(): boolean {
-        return this.profile?.id === this.auth.user()?.id;
-    }
+  isOwnProfile(): boolean {
+    return this.profile?.id === this.auth.user()?.id;
+  }
 }

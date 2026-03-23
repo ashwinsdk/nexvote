@@ -5,6 +5,7 @@ import { AuthService } from './services/auth.service';
 import { I18nService } from './services/i18n.service';
 import { ToastService } from './services/toast.service';
 import { LanguageTrayComponent } from './shared/language-tray.component';
+import { ApiService } from './services/api.service';
 
 @Component({
   selector: 'nv-root',
@@ -35,6 +36,18 @@ import { LanguageTrayComponent } from './shared/language-tray.component';
 
         <!-- Right actions -->
         <div class="nv-nav-actions">
+          @if (auth.isLoggedIn()) {
+            <a routerLink="/notifications" class="notif-btn" [attr.aria-label]="i18n.t('notifications.title')">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/>
+                <path d="M9 17a3 3 0 0 0 6 0"/>
+              </svg>
+              @if (unreadCount > 0) {
+                <span class="notif-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+              }
+            </a>
+          }
+
           <!-- Language button -->
           <button
             class="lang-btn"
@@ -77,6 +90,7 @@ import { LanguageTrayComponent } from './shared/language-tray.component';
             <a routerLink="/home" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.home') }}</a>
             <a routerLink="/communities" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.communities') }}</a>
             <a routerLink="/users" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.users') }}</a>
+            <a routerLink="/notifications" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('notifications.title') }}</a>
             <a [routerLink]="['/user', auth.user()?.id]" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.profile') }}</a>
             @if (auth.isAdmin()) {
               <a routerLink="/admin" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.dashboard') }}</a>
@@ -199,6 +213,44 @@ import { LanguageTrayComponent } from './shared/language-tray.component';
       align-items: center;
       gap: 8px;
       flex-shrink: 0;
+    }
+
+    .notif-btn {
+      position: relative;
+      width: 36px;
+      height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid var(--border);
+      border-radius: var(--r-sm);
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: all var(--motion-fast);
+    }
+
+    .notif-btn:hover {
+      border-color: var(--brand-primary);
+      color: var(--brand-primary-dark);
+      text-decoration: none;
+    }
+
+    .notif-badge {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: var(--danger);
+      color: white;
+      font-size: 10px;
+      font-weight: 800;
+      border: 2px solid var(--bg);
     }
 
     .lang-btn {
@@ -335,10 +387,35 @@ import { LanguageTrayComponent } from './shared/language-tray.component';
 export class AppComponent {
   showLangTray = signal(false);
   mobileMenuOpen = signal(false);
+  unreadCount = 0;
+  private unreadPollTimer: any = null;
 
   constructor(
     public auth: AuthService,
     public i18n: I18nService,
-    public toast: ToastService
-  ) { }
+    public toast: ToastService,
+    private api: ApiService
+  ) {
+    this.startUnreadPolling();
+  }
+
+  private startUnreadPolling(): void {
+    const refresh = () => {
+      if (!this.auth.isLoggedIn()) {
+        this.unreadCount = 0;
+        return;
+      }
+      this.api.getNotifications({ unreadOnly: true, limit: 1 }).subscribe({
+        next: (res) => {
+          this.unreadCount = res.unreadCount || 0;
+        },
+        error: () => {
+          this.unreadCount = 0;
+        },
+      });
+    };
+
+    refresh();
+    this.unreadPollTimer = setInterval(refresh, 30000);
+  }
 }
