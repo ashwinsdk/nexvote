@@ -161,6 +161,21 @@ class RelayerService {
             return false;
         }
     }
+
+    /**
+     * Verify a result hash against the on-chain record.
+     */
+    async verifyResultHash(proposalId: string, hash: string): Promise<boolean> {
+        if (!this.initialize() || !this.contract) return false;
+
+        try {
+            const proposalIdNum = BigInt('0x' + proposalId.replace(/-/g, '').slice(0, 16));
+            return await this.contract.verifyResultHash(proposalIdNum, hash);
+        } catch (err) {
+            logger.error({ err }, 'Failed to verify result hash');
+            return false;
+        }
+    }
 }
 
 export const relayerService = new RelayerService();

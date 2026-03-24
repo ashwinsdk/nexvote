@@ -26,6 +26,7 @@ import { ApiService } from './services/api.service';
           @if (auth.isLoggedIn()) {
             <a routerLink="/home" routerLinkActive="active" class="nv-nav-link">{{ i18n.t('nav.home') }}</a>
             <a routerLink="/communities" routerLinkActive="active" class="nv-nav-link">{{ i18n.t('nav.communities') }}</a>
+            <a routerLink="/transparency" routerLinkActive="active" class="nv-nav-link">Transparency</a>
             <a routerLink="/users" routerLinkActive="active" class="nv-nav-link">{{ i18n.t('nav.users') }}</a>
             <a [routerLink]="['/user', auth.user()?.id]" routerLinkActive="active" class="nv-nav-link">{{ i18n.t('nav.profile') }}</a>
             @if (auth.isAdmin()) {
@@ -89,6 +90,7 @@ import { ApiService } from './services/api.service';
           @if (auth.isLoggedIn()) {
             <a routerLink="/home" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.home') }}</a>
             <a routerLink="/communities" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.communities') }}</a>
+            <a routerLink="/transparency" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">Transparency</a>
             <a routerLink="/users" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.users') }}</a>
             <a routerLink="/notifications" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('notifications.title') }}</a>
             <a [routerLink]="['/user', auth.user()?.id]" (click)="mobileMenuOpen.set(false)" class="mobile-nav-link">{{ i18n.t('nav.profile') }}</a>

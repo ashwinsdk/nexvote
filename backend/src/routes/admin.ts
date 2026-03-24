@@ -74,6 +74,60 @@ const updateStatusSchema = z.object({
     description: z.string().max(2000).optional(),
 });
 
+const implementationUpdateSchema = z.object({
+    status: z.enum(['not_started', 'in_progress', 'blocked', 'completed']),
+    department: z.string().max(200).optional(),
+    completionPercent: z.number().int().min(0).max(100),
+    totalBudget: z.number().nonnegative().optional(),
+    targetDate: z.string().datetime().optional(),
+    publicComplete: z.boolean().optional(),
+});
+
+const milestoneSchema = z.object({
+    title: z.string().min(3).max(300),
+    description: z.string().max(3000).optional(),
+    status: z.enum(['pending', 'in_progress', 'completed', 'blocked']).optional(),
+    dueDate: z.string().datetime().optional(),
+});
+
+const implementationNoteSchema = z.object({
+    message: z.string().min(5).max(5000),
+    completionPercent: z.number().int().min(0).max(100).optional(),
+});
+
+const budgetReleaseSchema = z.object({
+    stage: z.number().int().min(1),
+    amount: z.number().positive(),
+    notes: z.string().max(2000).optional(),
+});
+
+const proofFileSchema = z.object({
+    label: z.string().min(2).max(200),
+    url: z.string().url(),
+    mimeType: z.string().max(100).optional(),
+});
+
+const resolveFraudAlertSchema = z.object({
+    status: z.enum(['resolved', 'dismissed']),
+    notes: z.string().max(2000).optional(),
+});
+
+const canManageImplementation = async (proposal: any, userId: string, role: string): Promise<boolean> => {
+    if (role === 'admin' || role === 'superadmin') {
+        return true;
+    }
+
+    const membership = await db('community_members')
+        .where({ community_id: proposal.community_id, user_id: userId })
+        .first();
+
+    if (!membership) {
+        return false;
+    }
+
+    return ['owner', 'moderator'].includes(membership.role);
+};
+
 // ── GET /api/admin/dashboard ────────────────────────────────────────────────
 
 router.get(
@@ -479,6 +533,497 @@ router.get(
         } catch (err) {
             logger.error({ err }, 'Failed to fetch audit log');
             res.status(500).json({ error: 'Failed to fetch audit log.' });
+        }
+    }
+);
+
+// ── GET /api/admin/transparency ─────────────────────────────────────────────
+
+router.get(
+    '/transparency',
+    authMiddleware,
+    requireRole('admin', 'superadmin'),
+    async (req: Request, res: Response) => {
+        try {
+            const totalProposalsRow = await db('proposals').count('* as count').first();
+            const activeVotesRow = await db('proposals').where({ status: 'voting' }).count('* as count').first();
+            const approvedRow = await db('proposals').where({ status: 'passed' }).count('* as count').first();
+            const outcomes = await db('proposals')
+                .select('status')
+                .count('* as count')
+                .whereIn('status', ['passed', 'failed', 'implemented', 'archived'])
+                .groupBy('status');
+
+            const [participationStats] = await db('proposals').select(
+                db.raw('COALESCE(AVG(participation_rate), 0) as avg_participation_rate'),
+                db.raw("COALESCE(AVG(CASE WHEN quorum_met THEN 1 ELSE 0 END), 0) as quorum_success_rate")
+            );
+
+            const implementationByStatus = await db('proposal_implementations')
+                .select('status')
+                .count('* as count')
+                .groupBy('status');
+
+            const [onchainRow] = await db('proposals').select(
+                db.raw("COUNT(*) FILTER (WHERE tx_hash IS NOT NULL) as proposal_tx_count"),
+                db.raw("COUNT(*) FILTER (WHERE result_hash IS NOT NULL) as finalized_hash_count")
+            );
+
+            const totalProposals = parseInt(String(totalProposalsRow?.count || '0'), 10);
+            const approvedCount = parseInt(String(approvedRow?.count || '0'), 10);
+            const approvalRate = totalProposals > 0 ? (approvedCount / totalProposals) * 100 : 0;
+
+            res.json({
+                totals: {
+                    proposals: totalProposals,
+                    activeVotes: parseInt(String(activeVotesRow?.count || '0'), 10),
+                    approvalRate,
+                    participationRate: Number(participationStats?.avg_participation_rate || 0),
+                    quorumSuccessRate: Number(participationStats?.quorum_success_rate || 0),
+                },
+                finalOutcomes: outcomes,
+                implementationStatus: implementationByStatus,
+                onChainVerification: {
+                    proposalAnchored: parseInt(String(onchainRow?.proposal_tx_count || '0'), 10),
+                    resultAnchored: parseInt(String(onchainRow?.finalized_hash_count || '0'), 10),
+                },
+            });
+        } catch (err) {
+            logger.error({ err }, 'Failed to fetch transparency metrics');
+            res.status(500).json({ error: 'Failed to fetch transparency metrics.' });
+        }
+    }
+);
+
+// ── GET /api/admin/implementations/overview ───────────────────────────────
+
+router.get(
+    '/implementations/overview',
+    authMiddleware,
+    requireRole('admin', 'superadmin'),
+    async (_req: Request, res: Response) => {
+        try {
+            const rows = await db('proposal_implementations as pi')
+                .join('proposals as p', 'pi.proposal_id', 'p.id')
+                .join('communities as c', 'p.community_id', 'c.id')
+                .select(
+                    'pi.*',
+                    'p.title as proposal_title',
+                    'p.status as proposal_status',
+                    'c.id as community_id',
+                    'c.name as community_name'
+                )
+                .orderBy('pi.updated_at', 'desc');
+
+            res.json({ implementations: rows });
+        } catch (err) {
+            logger.error({ err }, 'Failed to fetch implementation overview');
+            res.status(500).json({ error: 'Failed to fetch implementation overview.' });
+        }
+    }
+);
+
+// ── GET /api/admin/proposals/:id/implementation ───────────────────────────
+
+router.get(
+    '/proposals/:id/implementation',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const proposalId = String(req.params.id);
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const implementation = await db('proposal_implementations')
+                .where({ proposal_id: proposalId })
+                .first();
+
+            if (!implementation) {
+                res.json({ implementation: null, milestones: [], updates: [], budgetReleases: [], proofFiles: [] });
+                return;
+            }
+
+            const [milestones, updates, budgetReleases, proofFiles] = await Promise.all([
+                db('implementation_milestones').where({ implementation_id: implementation.id }).orderBy('created_at', 'asc'),
+                db('implementation_updates').where({ implementation_id: implementation.id }).orderBy('created_at', 'desc'),
+                db('implementation_budget_releases').where({ implementation_id: implementation.id }).orderBy('stage', 'asc'),
+                db('implementation_proof_files').where({ implementation_id: implementation.id }).orderBy('created_at', 'desc'),
+            ]);
+
+            res.json({ implementation, milestones, updates, budgetReleases, proofFiles });
+        } catch (err) {
+            logger.error({ err }, 'Failed to fetch implementation details');
+            res.status(500).json({ error: 'Failed to fetch implementation details.' });
+        }
+    }
+);
+
+// ── PUT /api/admin/proposals/:id/implementation ───────────────────────────
+
+router.put(
+    '/proposals/:id/implementation',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const body = implementationUpdateSchema.parse(req.body);
+            const proposalId = String(req.params.id);
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const allowed = await canManageImplementation(proposal, req.user!.userId, req.user!.role);
+            if (!allowed) {
+                res.status(403).json({ error: 'Only community owner/moderator or admin can update implementation.' });
+                return;
+            }
+
+            const existingImplementation = await db('proposal_implementations')
+                .where({ proposal_id: proposalId })
+                .first();
+
+            await db('proposal_implementations')
+                .insert({
+                    proposal_id: proposalId,
+                    status: body.status,
+                    department: body.department || null,
+                    completion_percent: body.completionPercent,
+                    total_budget: body.totalBudget || null,
+                    target_date: body.targetDate ? new Date(body.targetDate) : null,
+                    public_complete: body.publicComplete ?? false,
+                    completed_at: body.status === 'completed' ? new Date() : null,
+                    updated_by: req.user!.userId,
+                })
+                .onConflict('proposal_id')
+                .merge({
+                    status: body.status,
+                    department: body.department ?? existingImplementation?.department ?? null,
+                    completion_percent: body.completionPercent,
+                    total_budget: body.totalBudget ?? existingImplementation?.total_budget ?? null,
+                    target_date: body.targetDate
+                        ? new Date(body.targetDate)
+                        : (existingImplementation?.target_date ?? null),
+                    public_complete: body.publicComplete ?? existingImplementation?.public_complete ?? false,
+                    completed_at: body.status === 'completed' ? new Date() : null,
+                    updated_by: req.user!.userId,
+                    updated_at: new Date(),
+                });
+
+            if (body.status === 'completed') {
+                await db('proposals').where({ id: proposalId }).update({
+                    status: 'implemented',
+                    updated_at: new Date(),
+                });
+            }
+
+            await db('audit_log').insert({
+                event_type: 'implementation_updated',
+                reference_id: proposalId,
+                reference_table: 'proposals',
+                actor_id: req.user!.userId,
+                details: {
+                    status: body.status,
+                    completionPercent: body.completionPercent,
+                    department: body.department || null,
+                },
+            });
+
+            res.json({ message: 'Implementation updated.', proposalId });
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to update implementation');
+            res.status(500).json({ error: 'Failed to update implementation.' });
+        }
+    }
+);
+
+// ── POST /api/admin/proposals/:id/implementation/milestones ───────────────
+
+router.post(
+    '/proposals/:id/implementation/milestones',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const body = milestoneSchema.parse(req.body);
+            const proposalId = String(req.params.id);
+
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const allowed = await canManageImplementation(proposal, req.user!.userId, req.user!.role);
+            if (!allowed) {
+                res.status(403).json({ error: 'Insufficient permissions.' });
+                return;
+            }
+
+            const implementation = await db('proposal_implementations').where({ proposal_id: proposalId }).first();
+            if (!implementation) {
+                res.status(400).json({ error: 'Create implementation details first.' });
+                return;
+            }
+
+            const [milestone] = await db('implementation_milestones')
+                .insert({
+                    implementation_id: implementation.id,
+                    title: body.title,
+                    description: body.description || null,
+                    status: body.status || 'pending',
+                    due_date: body.dueDate ? new Date(body.dueDate) : null,
+                    updated_by: req.user!.userId,
+                })
+                .returning('*');
+
+            res.status(201).json(milestone);
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to add implementation milestone');
+            res.status(500).json({ error: 'Failed to add implementation milestone.' });
+        }
+    }
+);
+
+// ── POST /api/admin/proposals/:id/implementation/updates ──────────────────
+
+router.post(
+    '/proposals/:id/implementation/updates',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const body = implementationNoteSchema.parse(req.body);
+            const proposalId = String(req.params.id);
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const allowed = await canManageImplementation(proposal, req.user!.userId, req.user!.role);
+            if (!allowed) {
+                res.status(403).json({ error: 'Insufficient permissions.' });
+                return;
+            }
+
+            const implementation = await db('proposal_implementations').where({ proposal_id: proposalId }).first();
+            if (!implementation) {
+                res.status(400).json({ error: 'Create implementation details first.' });
+                return;
+            }
+
+            const [update] = await db('implementation_updates')
+                .insert({
+                    implementation_id: implementation.id,
+                    message: body.message,
+                    completion_percent: body.completionPercent || null,
+                    author_id: req.user!.userId,
+                })
+                .returning('*');
+
+            if (typeof body.completionPercent === 'number') {
+                await db('proposal_implementations').where({ id: implementation.id }).update({
+                    completion_percent: body.completionPercent,
+                    updated_by: req.user!.userId,
+                    updated_at: new Date(),
+                });
+            }
+
+            res.status(201).json(update);
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to add implementation update');
+            res.status(500).json({ error: 'Failed to add implementation update.' });
+        }
+    }
+);
+
+// ── POST /api/admin/proposals/:id/implementation/budget-releases ──────────
+
+router.post(
+    '/proposals/:id/implementation/budget-releases',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const body = budgetReleaseSchema.parse(req.body);
+            const proposalId = String(req.params.id);
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const allowed = await canManageImplementation(proposal, req.user!.userId, req.user!.role);
+            if (!allowed) {
+                res.status(403).json({ error: 'Insufficient permissions.' });
+                return;
+            }
+
+            const implementation = await db('proposal_implementations').where({ proposal_id: proposalId }).first();
+            if (!implementation) {
+                res.status(400).json({ error: 'Create implementation details first.' });
+                return;
+            }
+
+            const [release] = await db('implementation_budget_releases')
+                .insert({
+                    implementation_id: implementation.id,
+                    stage: body.stage,
+                    amount: body.amount,
+                    notes: body.notes || null,
+                    approved_by: req.user!.userId,
+                })
+                .returning('*');
+
+            await db('proposal_implementations').where({ id: implementation.id }).update({
+                released_budget: db.raw('released_budget + ?', [body.amount]),
+                updated_by: req.user!.userId,
+                updated_at: new Date(),
+            });
+
+            res.status(201).json(release);
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to add implementation budget release');
+            res.status(500).json({ error: 'Failed to add implementation budget release.' });
+        }
+    }
+);
+
+// ── POST /api/admin/proposals/:id/implementation/proof ────────────────────
+
+router.post(
+    '/proposals/:id/implementation/proof',
+    authMiddleware,
+    async (req: Request, res: Response) => {
+        try {
+            const body = proofFileSchema.parse(req.body);
+            const proposalId = String(req.params.id);
+            const proposal = await db('proposals').where({ id: proposalId }).first();
+            if (!proposal) {
+                res.status(404).json({ error: 'Proposal not found.' });
+                return;
+            }
+
+            const allowed = await canManageImplementation(proposal, req.user!.userId, req.user!.role);
+            if (!allowed) {
+                res.status(403).json({ error: 'Insufficient permissions.' });
+                return;
+            }
+
+            const implementation = await db('proposal_implementations').where({ proposal_id: proposalId }).first();
+            if (!implementation) {
+                res.status(400).json({ error: 'Create implementation details first.' });
+                return;
+            }
+
+            const [proof] = await db('implementation_proof_files')
+                .insert({
+                    implementation_id: implementation.id,
+                    label: body.label,
+                    url: body.url,
+                    mime_type: body.mimeType || null,
+                    uploaded_by: req.user!.userId,
+                })
+                .returning('*');
+
+            res.status(201).json(proof);
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to upload implementation proof');
+            res.status(500).json({ error: 'Failed to upload implementation proof.' });
+        }
+    }
+);
+
+// ── GET /api/admin/fraud-alerts ───────────────────────────────────────────
+
+router.get(
+    '/fraud-alerts',
+    authMiddleware,
+    requireRole('admin', 'superadmin'),
+    async (req: Request, res: Response) => {
+        try {
+            const status = String(req.query.status || 'open');
+            const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10)));
+
+            const rows = await db('fraud_alerts')
+                .where(status === 'all' ? {} : { status })
+                .orderBy('created_at', 'desc')
+                .limit(limit);
+
+            res.json({ alerts: rows });
+        } catch (err) {
+            logger.error({ err }, 'Failed to fetch fraud alerts');
+            res.status(500).json({ error: 'Failed to fetch fraud alerts.' });
+        }
+    }
+);
+
+// ── POST /api/admin/fraud-alerts/:id/resolve ──────────────────────────────
+
+router.post(
+    '/fraud-alerts/:id/resolve',
+    authMiddleware,
+    requireRole('admin', 'superadmin'),
+    async (req: Request, res: Response) => {
+        try {
+            const alertId = String(req.params.id);
+            const body = resolveFraudAlertSchema.parse(req.body);
+
+            const updated = await db('fraud_alerts')
+                .where({ id: alertId })
+                .update({
+                    status: body.status,
+                    resolution_notes: body.notes || null,
+                    resolved_by: req.user!.userId,
+                    resolved_at: new Date(),
+                    updated_at: new Date(),
+                });
+
+            if (!updated) {
+                res.status(404).json({ error: 'Fraud alert not found.' });
+                return;
+            }
+
+            await db('audit_log').insert({
+                event_type: 'fraud_alert_resolved',
+                reference_id: alertId,
+                reference_table: 'fraud_alerts',
+                actor_id: req.user!.userId,
+                details: {
+                    status: body.status,
+                    notes: body.notes || null,
+                },
+            });
+
+            res.json({ message: 'Fraud alert updated.' });
+        } catch (err) {
+            if (err instanceof z.ZodError) {
+                res.status(400).json({ error: 'Validation failed.', details: err.errors });
+                return;
+            }
+            logger.error({ err }, 'Failed to resolve fraud alert');
+            res.status(500).json({ error: 'Failed to resolve fraud alert.' });
         }
     }
 );

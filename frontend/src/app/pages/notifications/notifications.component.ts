@@ -60,6 +60,47 @@ import { ToastService } from '../../services/toast.service';
 
         <p *ngIf="notifications.length === 0" class="empty">{{ i18n.t('notifications.empty') }}</p>
       </section>
+
+      <section class="list-card">
+        <h2 class="section-title">Watchlist</h2>
+        <div class="notification-item" *ngFor="let p of watchedProposals; trackBy: trackById">
+          <div class="item-top">
+            <strong>{{ p.title }}</strong>
+            <span>{{ p.status }}</span>
+          </div>
+          <p>{{ p.community_name }} · {{ p.deadline | date:'shortDate' }}</p>
+          <div class="item-actions">
+            <a [routerLink]="['/proposal', p.id]" class="nv-btn nv-btn-outline">{{ i18n.t('notifications.open') }}</a>
+          </div>
+        </div>
+        <p *ngIf="watchedProposals.length === 0" class="empty">No watched proposals.</p>
+      </section>
+
+      <section class="list-card">
+        <h2 class="section-title">Activity Feed</h2>
+        <div class="notification-item" *ngFor="let item of activityFeed; trackBy: trackById">
+          <div class="item-top">
+            <strong>{{ item.metadata?.title || item.event_type }}</strong>
+            <span>{{ item.created_at | date:'short' }}</span>
+          </div>
+          <p>{{ item.metadata?.body || item.metadata?.summary || 'Activity update' }}</p>
+          <div class="item-actions" *ngIf="item.entity_type === 'proposal' && item.entity_id">
+            <a [routerLink]="['/proposal', item.entity_id]" class="nv-btn nv-btn-outline">{{ i18n.t('notifications.open') }}</a>
+          </div>
+        </div>
+        <p *ngIf="activityFeed.length === 0" class="empty">No recent feed activity.</p>
+      </section>
+
+      <section class="list-card">
+        <h2 class="section-title">Community Digest</h2>
+        <div class="notification-item" *ngFor="let d of digestCommunities; trackBy: trackByCommunityDigest">
+          <div class="item-top">
+            <strong>{{ d.community_name }}</strong>
+            <span>{{ d.event_count }} events</span>
+          </div>
+        </div>
+        <p *ngIf="digestCommunities.length === 0" class="empty">No digest activity in selected window.</p>
+      </section>
     </div>
   `,
     styles: [`
@@ -84,6 +125,9 @@ export class NotificationsComponent implements OnInit, OnDestroy {
     notifications: NotificationItem[] = [];
     settings: NotificationSettings | null = null;
     communitySettings: Array<{ id: string; name: string; slug: string; enabled: boolean }> = [];
+    watchedProposals: any[] = [];
+    activityFeed: any[] = [];
+    digestCommunities: any[] = [];
     private refreshTimer: any = null;
 
     constructor(private api: ApiService, public i18n: I18nService, private toast: ToastService) { }
@@ -101,10 +145,17 @@ export class NotificationsComponent implements OnInit, OnDestroy {
         return item.id;
     }
 
+    trackByCommunityDigest(_i: number, item: any): string {
+        return item.community_id;
+    }
+
     load(): void {
         this.loadNotifications();
         this.api.getNotificationSettings().subscribe((s) => (this.settings = s));
         this.api.getCommunityNotificationSettings().subscribe((res) => (this.communitySettings = res.communities));
+        this.api.getWatchedProposals().subscribe((res) => (this.watchedProposals = res.proposals));
+        this.api.getActivityFeed({ limit: 50 }).subscribe((res) => (this.activityFeed = res.items));
+        this.api.getCommunityDigest().subscribe((res) => (this.digestCommunities = res.communities));
     }
 
     loadNotifications(): void {

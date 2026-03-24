@@ -34,6 +34,16 @@ export interface Proposal {
     yes_count: number;
     no_count: number;
     abstain_count: number;
+    review_status?: 'draft' | 'pending_review' | 'changes_requested' | 'approved';
+    problem_statement?: string | null;
+    beneficiaries?: string | null;
+    timeline?: string | null;
+    budget_estimate?: number | null;
+    impact_summary?: string | null;
+    risk_analysis?: string | null;
+    attachments_proof?: string[] | null;
+    participation_rate?: number | null;
+    quorum_met?: boolean | null;
     community_name?: string;
     community_slug?: string;
     author_name?: string;
@@ -41,6 +51,7 @@ export interface Proposal {
     created_at: string;
     finalized_at: string | null;
     comments?: Comment[];
+    currentUserVote?: 'yes' | 'no' | 'abstain' | null;
 }
 
 export interface Comment {
@@ -51,12 +62,64 @@ export interface Comment {
     body: string;
     author_name: string;
     created_at: string;
+    stance?: 'for' | 'against' | 'neutral' | null;
+    sentiment_label?: string | null;
+    sentiment_confidence?: number | null;
+    cluster_label?: string | null;
+    is_pinned_expert?: boolean;
+    auto_hidden?: boolean;
 }
 
 export interface VoteResponse {
     message: string;
     choice: string;
     counts: { yes: number; no: number; abstain: number };
+    quorum_status?: 'met' | 'not_met';
+    current_participation?: number;
+    min_required_participation?: number;
+    min_required_voters?: number;
+}
+
+export interface GovernanceSettings {
+    communityId: string;
+    quorumPercent: number;
+    minVoterCount: number;
+    enabled: boolean;
+}
+
+export interface ImplementationRecord {
+    id: string;
+    proposal_id: string;
+    status: 'not_started' | 'in_progress' | 'blocked' | 'completed';
+    department: string | null;
+    completion_percent: number;
+    total_budget: number | null;
+    released_budget: number;
+    target_date: string | null;
+    public_complete: boolean;
+}
+
+export interface ProposalTemplateField {
+    id: string;
+    template_id: string;
+    field_key: string;
+    label: string;
+    field_type: string;
+    required: boolean;
+    placeholder: string | null;
+    help_text: string | null;
+    display_order: number;
+}
+
+export interface ProposalTemplate {
+    id: string;
+    community_id: string | null;
+    name: string;
+    description: string | null;
+    category: string;
+    is_default: boolean;
+    enabled: boolean;
+    fields: ProposalTemplateField[];
 }
 
 export interface NotificationItem {
@@ -140,6 +203,20 @@ export class ApiService {
 
     // ── Proposals ─────────────────────────────────────────────────────────
 
+    getProposalTemplates(params?: { communityId?: string; category?: string }): Observable<{ templates: ProposalTemplate[] }> {
+        let httpParams = new HttpParams();
+        if (params?.communityId) httpParams = httpParams.set('communityId', params.communityId);
+        if (params?.category) httpParams = httpParams.set('category', params.category);
+
+        return this.http.get<{ templates: ProposalTemplate[] }>(`${this.api}/proposals/templates`, {
+            params: httpParams,
+        });
+    }
+
+    getProposalTemplate(id: string): Observable<ProposalTemplate> {
+        return this.http.get<ProposalTemplate>(`${this.api}/proposals/templates/${id}`);
+    }
+
     getProposals(params?: {
         communityId?: string;
         region?: string;
@@ -178,8 +255,82 @@ export class ApiService {
         });
     }
 
+    getMyProposals(params?: { status?: string; limit?: number }): Observable<{ proposals: Proposal[] }> {
+        let httpParams = new HttpParams();
+        if (params?.status) httpParams = httpParams.set('status', params.status);
+        if (params?.limit) httpParams = httpParams.set('limit', params.limit.toString());
+
+        return this.http.get<{ proposals: Proposal[] }>(`${this.api}/proposals/mine`, {
+            params: httpParams,
+        });
+    }
+
     getProposal(id: string): Observable<Proposal> {
         return this.http.get<Proposal>(`${this.api}/proposals/${id}`);
+    }
+
+    getProposalAssistant(id: string): Observable<{
+        proposalId: string;
+        simpleExplanation: string;
+        discussionSummary: {
+            summary: string;
+            keyPros: string[];
+            keyCons: string[];
+            commentCount: number;
+        } | null;
+        quickAnswer: string;
+    }> {
+        return this.http.get<{
+            proposalId: string;
+            simpleExplanation: string;
+            discussionSummary: {
+                summary: string;
+                keyPros: string[];
+                keyCons: string[];
+                commentCount: number;
+            } | null;
+            quickAnswer: string;
+        }>(`${this.api}/proposals/${id}/assistant`);
+    }
+
+    getSimilarProposals(id: string, limit = 5): Observable<{ proposals: any[] }> {
+        return this.http.get<{ proposals: any[] }>(`${this.api}/proposals/${id}/similar`, {
+            params: new HttpParams().set('limit', String(limit)),
+        });
+    }
+
+    getDiscussionSummary(id: string): Observable<{
+        summary: string;
+        keyPros: string[];
+        keyCons: string[];
+        commentCount: number;
+    }> {
+        return this.http.get<{
+            summary: string;
+            keyPros: string[];
+            keyCons: string[];
+            commentCount: number;
+        }>(`${this.api}/proposals/${id}/discussion-summary`);
+    }
+
+    getOnChainStatus(id: string): Observable<{
+        proposalId: string;
+        proposalHash: string | null;
+        resultHash: string | null;
+        txHash: string | null;
+        proposalVerified: boolean;
+        resultVerified: boolean;
+        hasAnyOnChainRecord: boolean;
+    }> {
+        return this.http.get<{
+            proposalId: string;
+            proposalHash: string | null;
+            resultHash: string | null;
+            txHash: string | null;
+            proposalVerified: boolean;
+            resultVerified: boolean;
+            hasAnyOnChainRecord: boolean;
+        }>(`${this.api}/proposals/${id}/on-chain-status`);
     }
 
     createProposal(data: {
@@ -187,9 +338,57 @@ export class ApiService {
         title: string;
         text: string;
         category: string;
+        problemStatement: string;
+        expectedCost: number;
+        beneficiaries: string;
+        timeline: string;
+        impactSummary: string;
+        riskAnalysis: string;
+        attachmentsProof: string[];
+        submitForReview?: boolean;
         deadlineDays?: number;
     }): Observable<Proposal> {
         return this.http.post<Proposal>(`${this.api}/proposals`, data);
+    }
+
+    createProposalFromTemplate(
+        templateId: string,
+        payload: {
+            communityId: string;
+            title: string;
+            text: string;
+            deadlineDays?: number;
+            values?: Record<string, any>;
+            submitForReview?: boolean;
+        }
+    ): Observable<Proposal> {
+        return this.http.post<Proposal>(`${this.api}/proposals/from-template/${templateId}`, payload);
+    }
+
+    submitProposalForReview(proposalId: string): Observable<{ message: string }> {
+        return this.http.post<{ message: string }>(`${this.api}/proposals/${proposalId}/submit-review`, {});
+    }
+
+    publishProposal(proposalId: string): Observable<{ message: string; proposalId: string; status: string; reviewStatus: string }> {
+        return this.http.post<{ message: string; proposalId: string; status: string; reviewStatus: string }>(
+            `${this.api}/proposals/${proposalId}/publish`,
+            {}
+        );
+    }
+
+    deleteDraftProposal(proposalId: string): Observable<{ message: string; proposalId: string }> {
+        return this.http.delete<{ message: string; proposalId: string }>(`${this.api}/proposals/${proposalId}/draft`);
+    }
+
+    reviewProposal(
+        proposalId: string,
+        action: 'approve' | 'request_changes',
+        notes?: string
+    ): Observable<{ message: string; proposalId: string; reviewStatus: string; status: string }> {
+        return this.http.post<{ message: string; proposalId: string; reviewStatus: string; status: string }>(
+            `${this.api}/proposals/${proposalId}/review`,
+            { action, notes }
+        );
     }
 
     vote(proposalId: string, choice: 'yes' | 'no' | 'abstain'): Observable<VoteResponse> {
@@ -204,11 +403,24 @@ export class ApiService {
         );
     }
 
-    addComment(proposalId: string, body: string, parentId?: string): Observable<Comment> {
+    addComment(
+        proposalId: string,
+        body: string,
+        parentId?: string,
+        stance: 'for' | 'against' | 'neutral' = 'neutral'
+    ): Observable<Comment> {
         return this.http.post<Comment>(`${this.api}/proposals/${proposalId}/comment`, {
             body,
             parentId,
+            stance,
         });
+    }
+
+    pinExpertComment(proposalId: string, commentId: string): Observable<{ message: string }> {
+        return this.http.post<{ message: string }>(
+            `${this.api}/proposals/${proposalId}/comments/${commentId}/pin-expert`,
+            {}
+        );
     }
 
     extendProposalDeadline(proposalId: string, days: number, reason?: string): Observable<{
@@ -273,6 +485,114 @@ export class ApiService {
         });
     }
 
+    getTransparencyMetrics(): Observable<any> {
+        return this.http.get<any>(`${this.api}/admin/transparency`);
+    }
+
+    getPublicTransparencyMetrics(): Observable<any> {
+        return this.http.get<any>(`${this.api}/proposals/transparency`);
+    }
+
+    getImplementationOverview(): Observable<{ implementations: any[] }> {
+        return this.http.get<{ implementations: any[] }>(`${this.api}/admin/implementations/overview`);
+    }
+
+    getFraudAlerts(params?: {
+        status?: 'open' | 'in_review' | 'resolved' | 'dismissed' | 'all';
+        limit?: number;
+    }): Observable<{ alerts: any[] }> {
+        let httpParams = new HttpParams();
+        if (params?.status) httpParams = httpParams.set('status', params.status);
+        if (params?.limit) httpParams = httpParams.set('limit', params.limit.toString());
+
+        return this.http.get<{ alerts: any[] }>(`${this.api}/admin/fraud-alerts`, {
+            params: httpParams,
+        });
+    }
+
+    resolveFraudAlert(
+        alertId: string,
+        payload: { status: 'resolved' | 'dismissed'; notes?: string }
+    ): Observable<{ message: string }> {
+        return this.http.post<{ message: string }>(`${this.api}/admin/fraud-alerts/${alertId}/resolve`, payload);
+    }
+
+    getImplementation(proposalId: string): Observable<{
+        implementation: ImplementationRecord | null;
+        milestones: any[];
+        updates: any[];
+        budgetReleases: any[];
+        proofFiles: any[];
+    }> {
+        return this.http.get<{
+            implementation: ImplementationRecord | null;
+            milestones: any[];
+            updates: any[];
+            budgetReleases: any[];
+            proofFiles: any[];
+        }>(`${this.api}/admin/proposals/${proposalId}/implementation`);
+    }
+
+    updateImplementation(proposalId: string, payload: {
+        status: 'not_started' | 'in_progress' | 'blocked' | 'completed';
+        department?: string;
+        completionPercent: number;
+        totalBudget?: number;
+        targetDate?: string;
+        publicComplete?: boolean;
+    }): Observable<{ message: string; proposalId: string }> {
+        return this.http.put<{ message: string; proposalId: string }>(
+            `${this.api}/admin/proposals/${proposalId}/implementation`,
+            payload
+        );
+    }
+
+    addImplementationMilestone(proposalId: string, payload: {
+        title: string;
+        description?: string;
+        status?: 'pending' | 'in_progress' | 'completed' | 'blocked';
+        dueDate?: string;
+    }): Observable<any> {
+        return this.http.post<any>(`${this.api}/admin/proposals/${proposalId}/implementation/milestones`, payload);
+    }
+
+    addImplementationUpdate(proposalId: string, payload: {
+        message: string;
+        completionPercent?: number;
+    }): Observable<any> {
+        return this.http.post<any>(`${this.api}/admin/proposals/${proposalId}/implementation/updates`, payload);
+    }
+
+    addImplementationBudgetRelease(proposalId: string, payload: {
+        stage: number;
+        amount: number;
+        notes?: string;
+    }): Observable<any> {
+        return this.http.post<any>(`${this.api}/admin/proposals/${proposalId}/implementation/budget-releases`, payload);
+    }
+
+    addImplementationProof(proposalId: string, payload: {
+        label: string;
+        url: string;
+        mimeType?: string;
+    }): Observable<any> {
+        return this.http.post<any>(`${this.api}/admin/proposals/${proposalId}/implementation/proof`, payload);
+    }
+
+    getGovernanceSettings(slug: string): Observable<GovernanceSettings> {
+        return this.http.get<GovernanceSettings>(`${this.api}/communities/${slug}/governance-settings`);
+    }
+
+    updateGovernanceSettings(slug: string, payload: {
+        quorumPercent: number;
+        minVoterCount: number;
+    }): Observable<{ message: string; communityId: string; quorumPercent: number; minVoterCount: number }> {
+        return this.http.put<{ message: string; communityId: string; quorumPercent: number; minVoterCount: number }>(
+            `${this.api}/communities/${slug}/governance-settings`,
+            payload
+        );
+    }
+
     getNotifications(params?: {
         page?: number;
         limit?: number;
@@ -313,5 +633,34 @@ export class ApiService {
 
     updateCommunityNotificationSetting(communityId: string, enabled: boolean): Observable<{ message: string }> {
         return this.http.put<{ message: string }>(`${this.api}/notifications/settings/communities/${communityId}`, { enabled });
+    }
+
+    setProposalWatch(proposalId: string, watch: boolean): Observable<{ message: string }> {
+        return this.http.post<{ message: string }>(`${this.api}/notifications/watch/proposals/${proposalId}`, { watch });
+    }
+
+    getWatchedProposals(): Observable<{ proposals: any[] }> {
+        return this.http.get<{ proposals: any[] }>(`${this.api}/notifications/watch/proposals`);
+    }
+
+    getActivityFeed(params?: { page?: number; limit?: number }): Observable<{ items: any[]; page: number; limit: number; watchlistCount: number }> {
+        let httpParams = new HttpParams();
+        if (params?.page) httpParams = httpParams.set('page', params.page.toString());
+        if (params?.limit) httpParams = httpParams.set('limit', params.limit.toString());
+
+        return this.http.get<{ items: any[]; page: number; limit: number; watchlistCount: number }>(
+            `${this.api}/notifications/feed/activity`,
+            { params: httpParams }
+        );
+    }
+
+    getCommunityDigest(since?: string): Observable<{ since: string; communities: any[] }> {
+        let httpParams = new HttpParams();
+        if (since) httpParams = httpParams.set('since', since);
+
+        return this.http.get<{ since: string; communities: any[] }>(
+            `${this.api}/notifications/digests/community`,
+            { params: httpParams }
+        );
     }
 }

@@ -1,5 +1,4 @@
 import logger from '../logger';
-import { aiService } from './ai';
 
 export type Locale = 'en' | 'ta' | 'hi' | 'kn' | 'ml' | 'te';
 
@@ -29,7 +28,7 @@ const loadFranc = async () => {
 };
 
 let googleTranslateFn: any = null;
-const fallbackWarnTracker = new Map<string, number>();
+const providerWarnTracker = new Map<string, number>();
 const loadGoogleTranslate = async () => {
     if (!googleTranslateFn) {
         const mod: any = await import('@vitalets/google-translate-api');
@@ -38,7 +37,7 @@ const loadGoogleTranslate = async () => {
     return googleTranslateFn;
 };
 
-const fallbackTranslate = async (
+const googleTranslate = async (
     text: string,
     source: Locale,
     target: Locale
@@ -96,7 +95,7 @@ export const translateText = async (
     }
 
     try {
-        const translation = await aiService.translate(text, source, target);
+        const translation = await googleTranslate(text, source, target);
         if (translationCache.size >= MAX_CACHE_ENTRIES) {
             translationCache.clear();
         }
@@ -105,24 +104,17 @@ export const translateText = async (
     } catch (err) {
         const warnKey = `${source}->${target}`;
         const now = Date.now();
-        const lastWarnAt = fallbackWarnTracker.get(warnKey) || 0;
+        const lastWarnAt = providerWarnTracker.get(warnKey) || 0;
         if (now - lastWarnAt > 60_000) {
-            fallbackWarnTracker.set(warnKey, now);
+            providerWarnTracker.set(warnKey, now);
             logger.debug(
                 { source, target, message: (err as Error)?.message },
-                'Primary translation failed, using fallback provider'
+                'Google translation failed, returning original text'
             );
         } else {
-            logger.debug({ source, target }, 'Primary translation failed, using fallback provider');
+            logger.debug({ source, target }, 'Google translation failed, returning original text');
         }
-        const translated = await fallbackTranslate(text, source, target);
-        if (translated !== text) {
-            if (translationCache.size >= MAX_CACHE_ENTRIES) {
-                translationCache.clear();
-            }
-            translationCache.set(key, translated);
-        }
-        return translated;
+        return text;
     }
 };
 

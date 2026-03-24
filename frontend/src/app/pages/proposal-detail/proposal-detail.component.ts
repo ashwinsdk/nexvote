@@ -1,11 +1,13 @@
 import { Component, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import { ApiService, Proposal } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { I18nService } from '../../services/i18n.service';
 import { ToastService } from '../../services/toast.service';
+import { OfflineDraftService } from '../../services/offline-draft.service';
+import { NetworkPreferencesService } from '../../services/network-preferences.service';
 
 @Component({
   selector: 'nv-proposal-detail',
@@ -40,6 +42,15 @@ import { ToastService } from '../../services/toast.service';
               {{ i18n.t('proposal.deadline') }}: {{ proposal.deadline | date:'mediumDate' }}
             }
           </p>
+          <div class="header-actions">
+            <button class="nv-btn nv-btn-outline" (click)="toggleWatch()" [disabled]="watchBusy">
+              {{ watching ? 'Following proposal' : 'Follow proposal' }}
+            </button>
+            <label class="checkbox-inline">
+              <input type="checkbox" [checked]="networkPrefs.isLowBandwidth()" (change)="toggleLowBandwidth($event)" />
+              Low-bandwidth mode
+            </label>
+          </div>
         </section>
 
         <!-- AI Summary -->
@@ -54,6 +65,31 @@ import { ToastService } from '../../services/toast.service';
         <section class="body-card">
           <p class="body-text">{{ proposal.text }}</p>
         </section>
+
+        @if (canManageDraft()) {
+          <section class="extend-section">
+            <h3 class="section-label">Draft Actions</h3>
+            <p class="extend-help">Move this proposal live, submit it for review, or delete the draft.</p>
+            <div class="extend-controls">
+              @if (canSubmitForReview()) {
+                <button class="nv-btn nv-btn-outline" (click)="submitDraftForReview()" [disabled]="draftActionBusy">Submit For Review</button>
+              }
+              <button class="nv-btn nv-btn-primary" (click)="publishDraft()" [disabled]="draftActionBusy">Move Live</button>
+              <button class="nv-btn nv-btn-outline" (click)="deleteDraft()" [disabled]="draftActionBusy">Delete Draft</button>
+            </div>
+          </section>
+        }
+
+        @if (shouldShowAssistant()) {
+          <section class="summary-card">
+            <span class="summary-label">{{ explainerLabel() }}</span>
+            <p>{{ assistant.simpleExplanation }}</p>
+            @if (assistant.discussionSummary) {
+              <p><strong>Pros:</strong> {{ assistant.discussionSummary.keyPros.join('; ') || '-' }}</p>
+              <p><strong>Cons:</strong> {{ assistant.discussionSummary.keyCons.join('; ') || '-' }}</p>
+            }
+          </section>
+        }
 
         <!-- Vote Section -->
         @if (proposal.status === 'voting') {
@@ -174,15 +210,41 @@ import { ToastService } from '../../services/toast.service';
                 </a>
               </div>
             }
+            @if (onChainStatus) {
+              <div class="audit-row">
+                <span class="audit-key">ON-CHAIN</span>
+                <span class="audit-val">Proposal: {{ onChainStatus.proposalVerified ? 'verified' : 'not verified' }} · Result: {{ onChainStatus.resultVerified ? 'verified' : 'not verified' }}</span>
+              </div>
+            }
           </section>
         }
 
         <!-- Comments -->
         <section class="comments-section">
-          <h3 class="section-label">{{ i18n.t('proposal.discussion') }}</h3>
+          <div class="comments-head">
+            <h3 class="section-label">{{ i18n.t('proposal.discussion') }}</h3>
+            <button class="nv-btn nv-btn-outline" (click)="refreshChatSummary()" [disabled]="chatSummaryLoading || !proposal.id">
+              {{ chatSummaryLoading ? 'Summarizing…' : 'Summarize Chats' }}
+            </button>
+          </div>
+
+          @if (chatSummary) {
+            <section class="summary-card chat-summary-card">
+              <span class="summary-label">AI CHAT SUMMARY</span>
+              <p>{{ chatSummary.summary }}</p>
+              <p><strong>Key pros:</strong> {{ (chatSummary.keyPros || []).join('; ') || '-' }}</p>
+              <p><strong>Key cons:</strong> {{ (chatSummary.keyCons || []).join('; ') || '-' }}</p>
+              <p><strong>Comments analyzed:</strong> {{ chatSummary.commentCount || 0 }}</p>
+            </section>
+          }
 
           @if (auth.isLoggedIn()) {
             <div class="comment-form">
+              <select class="nv-input" [(ngModel)]="commentStance" [ngModelOptions]="{standalone: true}">
+                <option value="neutral">Neutral</option>
+                <option value="for">For</option>
+                <option value="against">Against</option>
+              </select>
               <textarea
                 class="nv-input"
                 [placeholder]="i18n.t('proposal.comment.placeholder')"
@@ -199,25 +261,135 @@ import { ToastService } from '../../services/toast.service';
             </div>
           }
 
-          @for (comment of proposal.comments; track comment.id) {
-            <div class="comment-card"
-              [class.is-author]="comment.user_id === proposal!.created_by"
-              [class.is-own]="comment.user_id === auth.user()?.id">
-              <div class="comment-top">
-                <div class="comment-info">
-                  <a [routerLink]="['/user', comment.user_id]" class="comment-name">{{ comment.author_name }}</a>
-                  @if (comment.user_id === proposal!.created_by) {
-                    <span class="comment-tag tag-author">{{ i18n.t('comment.author') }}</span>
+          <div class="comment-sections">
+            <div class="comment-lane">
+              <h4 class="lane-title">{{ stanceLabel('for') }}</h4>
+              @for (comment of sectionComments('for'); track comment.id) {
+                <div class="comment-card"
+                  [class.is-author]="comment.user_id === proposal!.created_by"
+                  [class.is-own]="comment.user_id === auth.user()?.id">
+                  <div class="comment-top">
+                    <div class="comment-info">
+                      <a [routerLink]="['/user', comment.user_id]" class="comment-name">{{ comment.author_name }}</a>
+                      @if (comment.user_id === proposal!.created_by) {
+                        <span class="comment-tag tag-author">{{ i18n.t('comment.author') }}</span>
+                      }
+                      @if (comment.user_id === auth.user()?.id) {
+                        <span class="comment-tag tag-you">{{ i18n.t('comment.you') }}</span>
+                      }
+                    </div>
+                    <span class="comment-date">{{ comment.created_at | date:'short' }}</span>
+                  </div>
+                  <p class="comment-body">{{ comment.body }}</p>
+                  <div class="comment-info">
+                    @if (comment.is_pinned_expert) {
+                      <span class="comment-tag tag-author">expert</span>
+                    }
+                    @if ((auth.user()?.role === 'admin' || auth.user()?.role === 'superadmin') && !comment.is_pinned_expert) {
+                      <button class="nv-btn nv-btn-outline" (click)="pinExpert(comment.id)">Pin expert</button>
+                    }
+                  </div>
+
+                  @for (reply of childComments(comment.id); track reply.id) {
+                    <div class="comment-card reply-card">
+                      <div class="comment-top">
+                        <a [routerLink]="['/user', reply.user_id]" class="comment-name">{{ reply.author_name || 'User' }}</a>
+                        <span class="comment-date">{{ reply.created_at | date:'short' }}</span>
+                      </div>
+                      <p class="comment-body">{{ reply.body }}</p>
+                    </div>
                   }
-                  @if (comment.user_id === auth.user()?.id) {
-                    <span class="comment-tag tag-you">{{ i18n.t('comment.you') }}</span>
+
+                  @if (auth.isLoggedIn()) {
+                    <div class="reply-row">
+                      <input class="nv-input" [ngModel]="replyDrafts[comment.id]" (ngModelChange)="replyDrafts[comment.id] = $event" [placeholder]="i18n.t('proposal.comment.placeholder')" />
+                      <button class="nv-btn nv-btn-outline" (click)="addReply(comment.id)">{{ i18n.t('proposal.comment.submit') }}</button>
+                    </div>
                   }
                 </div>
-                <span class="comment-date">{{ comment.created_at | date:'short' }}</span>
-              </div>
-              <p class="comment-body">{{ comment.body }}</p>
+              }
             </div>
-          }
+
+            <div class="comment-lane">
+              <h4 class="lane-title">{{ stanceLabel('against') }}</h4>
+              @for (comment of sectionComments('against'); track comment.id) {
+                <div class="comment-card"
+                  [class.is-author]="comment.user_id === proposal!.created_by"
+                  [class.is-own]="comment.user_id === auth.user()?.id">
+                  <div class="comment-top">
+                    <div class="comment-info">
+                      <a [routerLink]="['/user', comment.user_id]" class="comment-name">{{ comment.author_name }}</a>
+                      @if (comment.user_id === proposal!.created_by) {
+                        <span class="comment-tag tag-author">{{ i18n.t('comment.author') }}</span>
+                      }
+                      @if (comment.user_id === auth.user()?.id) {
+                        <span class="comment-tag tag-you">{{ i18n.t('comment.you') }}</span>
+                      }
+                    </div>
+                    <span class="comment-date">{{ comment.created_at | date:'short' }}</span>
+                  </div>
+                  <p class="comment-body">{{ comment.body }}</p>
+
+                  @for (reply of childComments(comment.id); track reply.id) {
+                    <div class="comment-card reply-card">
+                      <div class="comment-top">
+                        <a [routerLink]="['/user', reply.user_id]" class="comment-name">{{ reply.author_name || 'User' }}</a>
+                        <span class="comment-date">{{ reply.created_at | date:'short' }}</span>
+                      </div>
+                      <p class="comment-body">{{ reply.body }}</p>
+                    </div>
+                  }
+
+                  @if (auth.isLoggedIn()) {
+                    <div class="reply-row">
+                      <input class="nv-input" [ngModel]="replyDrafts[comment.id]" (ngModelChange)="replyDrafts[comment.id] = $event" [placeholder]="i18n.t('proposal.comment.placeholder')" />
+                      <button class="nv-btn nv-btn-outline" (click)="addReply(comment.id)">{{ i18n.t('proposal.comment.submit') }}</button>
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+
+            <div class="comment-lane">
+              <h4 class="lane-title">{{ stanceLabel('neutral') }}</h4>
+              @for (comment of sectionComments('neutral'); track comment.id) {
+                <div class="comment-card"
+                  [class.is-author]="comment.user_id === proposal!.created_by"
+                  [class.is-own]="comment.user_id === auth.user()?.id">
+                  <div class="comment-top">
+                    <div class="comment-info">
+                      <a [routerLink]="['/user', comment.user_id]" class="comment-name">{{ comment.author_name }}</a>
+                      @if (comment.user_id === proposal!.created_by) {
+                        <span class="comment-tag tag-author">{{ i18n.t('comment.author') }}</span>
+                      }
+                      @if (comment.user_id === auth.user()?.id) {
+                        <span class="comment-tag tag-you">{{ i18n.t('comment.you') }}</span>
+                      }
+                    </div>
+                    <span class="comment-date">{{ comment.created_at | date:'short' }}</span>
+                  </div>
+                  <p class="comment-body">{{ comment.body }}</p>
+
+                  @for (reply of childComments(comment.id); track reply.id) {
+                    <div class="comment-card reply-card">
+                      <div class="comment-top">
+                        <a [routerLink]="['/user', reply.user_id]" class="comment-name">{{ reply.author_name || 'User' }}</a>
+                        <span class="comment-date">{{ reply.created_at | date:'short' }}</span>
+                      </div>
+                      <p class="comment-body">{{ reply.body }}</p>
+                    </div>
+                  }
+
+                  @if (auth.isLoggedIn()) {
+                    <div class="reply-row">
+                      <input class="nv-input" [ngModel]="replyDrafts[comment.id]" (ngModelChange)="replyDrafts[comment.id] = $event" [placeholder]="i18n.t('proposal.comment.placeholder')" />
+                      <button class="nv-btn nv-btn-outline" (click)="addReply(comment.id)">{{ i18n.t('proposal.comment.submit') }}</button>
+                    </div>
+                  }
+                </div>
+              }
+            </div>
+          </div>
 
           @if (proposal.comments && proposal.comments.length === 0) {
             <p class="empty-comments">{{ i18n.t('proposal.comment.empty') }}</p>
@@ -291,6 +463,22 @@ import { ToastService } from '../../services/toast.service';
     .author-link:hover { color: var(--brand-primary); }
 
     .meta-sep { margin: 0 4px; }
+
+    .header-actions {
+      margin-top: var(--sp-1);
+      display: flex;
+      align-items: center;
+      gap: var(--sp-1);
+      flex-wrap: wrap;
+    }
+
+    .checkbox-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: var(--fs-xs);
+      color: var(--muted);
+    }
 
     /* ── Summary ── */
     .summary-card {
@@ -564,6 +752,38 @@ import { ToastService } from '../../services/toast.service';
       border-top: 2px solid var(--border);
     }
 
+    .comments-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--sp-2);
+      margin-bottom: var(--sp-2);
+    }
+
+    .chat-summary-card {
+      margin-bottom: var(--sp-2);
+    }
+
+    .comment-sections {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--sp-2);
+    }
+
+    .comment-lane {
+      display: flex;
+      flex-direction: column;
+      gap: var(--sp-1);
+    }
+
+    .lane-title {
+      margin: 0;
+      font-size: var(--fs-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
     .comment-form {
       display: flex;
       flex-direction: column;
@@ -581,6 +801,22 @@ import { ToastService } from '../../services/toast.service';
       border: 2px solid var(--border);
       border-radius: var(--r-sm);
       margin-bottom: var(--sp-2);
+    }
+
+    .reply-card {
+      margin-top: var(--sp-1);
+      margin-left: var(--sp-2);
+      border-style: dashed;
+    }
+
+    .reply-row {
+      display: flex;
+      gap: var(--sp-1);
+      margin-top: var(--sp-1);
+    }
+
+    .reply-row .nv-input {
+      flex: 1;
     }
 
     .comment-card.is-author {
@@ -661,6 +897,7 @@ import { ToastService } from '../../services/toast.service';
       }
       .vote-btn { max-width: 100%; }
       .result-stats { flex-wrap: wrap; gap: var(--sp-2); }
+      .comment-sections { grid-template-columns: 1fr; }
     }
   `],
 })
@@ -675,13 +912,25 @@ export class ProposalDetailComponent implements OnInit {
   submittingComment = false;
   extendDays = 3;
   extending = false;
+  commentStance: 'for' | 'against' | 'neutral' = 'neutral';
+  assistant: any = null;
+  chatSummary: { summary: string; keyPros: string[]; keyCons: string[]; commentCount: number } | null = null;
+  chatSummaryLoading = false;
+  onChainStatus: any = null;
+  watching = false;
+  watchBusy = false;
+  replyDrafts: Record<string, string> = {};
+  draftActionBusy = false;
 
   constructor(
     public auth: AuthService,
     private api: ApiService,
     private route: ActivatedRoute,
+    private router: Router,
     public i18n: I18nService,
-    private toast: ToastService
+    private toast: ToastService,
+    private offline: OfflineDraftService,
+    public networkPrefs: NetworkPreferencesService
   ) { }
 
   ngOnInit(): void {
@@ -689,7 +938,12 @@ export class ProposalDetailComponent implements OnInit {
     this.api.getProposal(id).subscribe({
       next: (proposal) => {
         this.proposal = proposal;
+        this.currentVote = proposal.currentUserVote || '';
         this.loading = false;
+        this.loadAssistantAndVerification(proposal.id);
+        this.loadChatSummary(proposal.id);
+        this.loadWatchState();
+        this.flushQueue(proposal.id);
       },
       error: () => {
         this.loading = false;
@@ -711,11 +965,12 @@ export class ProposalDetailComponent implements OnInit {
 
   castVote(choice: 'yes' | 'no' | 'abstain'): void {
     if (!this.proposal) return;
+    const proposalId = this.proposal.id;
     this.voting = true;
     this.voteMessage = '';
     this.justVoted = '';
 
-    this.api.vote(this.proposal.id, choice).subscribe({
+    this.api.vote(proposalId, choice).subscribe({
       next: (res) => {
         this.currentVote = choice;
         this.justVoted = choice;
@@ -730,7 +985,14 @@ export class ProposalDetailComponent implements OnInit {
         setTimeout(() => this.justVoted = '', 600);
       },
       error: (err) => {
-        this.voteMessage = err.error?.error || 'Failed to vote.';
+        const offline = !navigator.onLine;
+        if (offline) {
+          this.offline.enqueueAction({ type: 'vote', proposalId, payload: { choice } });
+          this.toast.show('Offline: vote queued and will sync when online.');
+          this.voteMessage = 'Vote queued offline.';
+        } else {
+          this.voteMessage = err.error?.error || 'Failed to vote.';
+        }
         this.voting = false;
       },
     });
@@ -763,16 +1025,295 @@ export class ProposalDetailComponent implements OnInit {
     if (!this.proposal || !this.newComment.trim()) return;
     this.submittingComment = true;
 
-    this.api.addComment(this.proposal.id, this.newComment).subscribe({
+    this.api.addComment(this.proposal.id, this.newComment, undefined, this.commentStance).subscribe({
       next: (comment) => {
         if (this.proposal?.comments) {
           this.proposal.comments.push(comment);
         }
+        if (this.proposal) {
+          this.loadChatSummary(this.proposal.id);
+        }
         this.newComment = '';
+        this.commentStance = 'neutral';
         this.submittingComment = false;
       },
       error: () => {
+        if (this.proposal && !navigator.onLine) {
+          this.offline.enqueueAction({
+            type: 'comment',
+            proposalId: this.proposal.id,
+            payload: { body: this.newComment, stance: this.commentStance },
+          });
+          this.toast.show('Offline: comment queued and will sync when online.');
+          this.newComment = '';
+          this.commentStance = 'neutral';
+        }
         this.submittingComment = false;
+      },
+    });
+  }
+
+  addReply(parentId: string): void {
+    if (!this.proposal) return;
+    const body = (this.replyDrafts[parentId] || '').trim();
+    if (!body) return;
+
+    this.api.addComment(this.proposal.id, body, parentId, this.commentStance).subscribe({
+      next: (comment) => {
+        if (this.proposal?.comments) {
+          this.proposal.comments.push(comment);
+        }
+        if (this.proposal) {
+          this.loadChatSummary(this.proposal.id);
+        }
+        this.replyDrafts[parentId] = '';
+      },
+      error: () => {
+        if (!this.proposal || navigator.onLine) return;
+        this.offline.enqueueAction({
+          type: 'comment',
+          proposalId: this.proposal.id,
+          payload: { body, parentId, stance: this.commentStance },
+        });
+        this.toast.show('Offline: reply queued and will sync when online.');
+        this.replyDrafts[parentId] = '';
+      },
+    });
+  }
+
+  sectionComments(stance: 'for' | 'against' | 'neutral'): any[] {
+    if (!this.proposal?.comments) return [];
+    return this.proposal.comments.filter((comment: any) => {
+      const value = comment.stance || 'neutral';
+      return value === stance && !comment.parent_id && this.hasVisibleBody(comment.body);
+    });
+  }
+
+  childComments(parentId: string): any[] {
+    if (!this.proposal?.comments) return [];
+    return this.proposal.comments.filter((comment: any) => comment.parent_id === parentId && this.hasVisibleBody(comment.body));
+  }
+
+  pinExpert(commentId: string): void {
+    if (!this.proposal) return;
+    this.api.pinExpertComment(this.proposal.id, commentId).subscribe({
+      next: () => {
+        this.toast.show('Pinned expert response.');
+        this.api.getProposal(this.proposal!.id).subscribe({
+          next: (proposal) => {
+            this.proposal = proposal;
+          },
+        });
+      },
+      error: () => this.toast.show('Failed to pin expert response.'),
+    });
+  }
+
+  toggleLowBandwidth(event: Event): void {
+    this.networkPrefs.setLowBandwidth((event.target as HTMLInputElement).checked);
+  }
+
+  toggleWatch(): void {
+    if (!this.proposal) return;
+    this.watchBusy = true;
+    this.api.setProposalWatch(this.proposal.id, !this.watching).subscribe({
+      next: () => {
+        this.watching = !this.watching;
+        this.watchBusy = false;
+      },
+      error: () => {
+        this.watchBusy = false;
+        this.toast.show('Failed to update follow status.');
+      },
+    });
+  }
+
+  private loadWatchState(): void {
+    if (!this.proposal) return;
+    this.api.getWatchedProposals().subscribe({
+      next: (res) => {
+        this.watching = res.proposals.some((item) => item.id === this.proposal!.id);
+      },
+    });
+  }
+
+  private loadAssistantAndVerification(proposalId: string): void {
+    if (!this.networkPrefs.shouldReducePayloads()) {
+      this.api.getProposalAssistant(proposalId).subscribe({ next: (res) => (this.assistant = res) });
+    } else {
+      this.assistant = null;
+    }
+    this.api.getOnChainStatus(proposalId).subscribe({ next: (res) => (this.onChainStatus = res) });
+  }
+
+  private loadChatSummary(proposalId: string): void {
+    this.chatSummaryLoading = true;
+    this.api.getDiscussionSummary(proposalId).subscribe({
+      next: (res) => {
+        this.chatSummary = {
+          summary: res.summary,
+          keyPros: res.keyPros || [],
+          keyCons: res.keyCons || [],
+          commentCount: res.commentCount || 0,
+        };
+        this.chatSummaryLoading = false;
+      },
+      error: () => {
+        this.chatSummaryLoading = false;
+      },
+    });
+  }
+
+  refreshChatSummary(): void {
+    if (!this.proposal) return;
+    this.loadChatSummary(this.proposal.id);
+  }
+
+  private flushQueue(proposalId: string): void {
+    if (!navigator.onLine) return;
+    const queue = this.offline.getQueue().filter((item) => item.proposalId === proposalId);
+    for (const item of queue) {
+      if (item.type === 'vote') {
+        this.api.vote(proposalId, item.payload.choice).subscribe({
+          next: () => this.offline.removeFromQueue(item.id),
+          error: () => undefined,
+        });
+      }
+      if (item.type === 'comment') {
+        this.api.addComment(proposalId, item.payload.body, item.payload.parentId, item.payload.stance || 'neutral').subscribe({
+          next: () => this.offline.removeFromQueue(item.id),
+          error: () => undefined,
+        });
+      }
+    }
+  }
+
+  shouldShowAssistant(): boolean {
+    if (!this.assistant?.simpleExplanation) {
+      return false;
+    }
+
+    const summary = (this.proposal?.summary || '').trim().toLowerCase();
+    const explanation = (this.assistant.simpleExplanation || '').trim().toLowerCase();
+    const hasDiscussion = !!this.assistant?.discussionSummary;
+    return hasDiscussion || (summary.length > 0 && explanation.length > 0 && summary !== explanation);
+  }
+
+  explainerLabel(): string {
+    const locale = this.i18n.locale();
+    if (locale === 'ta') return 'AI விளக்கம்';
+    if (locale === 'hi') return 'AI व्याख्या';
+    if (locale === 'kn') return 'AI ವಿವರಣೆ';
+    if (locale === 'ml') return 'AI വിശദീകരണം';
+    if (locale === 'te') return 'AI వివరణ';
+    return 'AI EXPLAINER';
+  }
+
+  stanceLabel(stance: 'for' | 'against' | 'neutral'): string {
+    const locale = this.i18n.locale();
+    if (locale === 'ta') {
+      if (stance === 'for') return 'ஆதரவாக';
+      if (stance === 'against') return 'எதிராக';
+      return 'நடுநிலை';
+    }
+    if (locale === 'hi') {
+      if (stance === 'for') return 'पक्ष में';
+      if (stance === 'against') return 'विरोध में';
+      return 'तटस्थ';
+    }
+    if (locale === 'kn') {
+      if (stance === 'for') return 'ಪಕ್ಷದಲ್ಲಿ';
+      if (stance === 'against') return 'ವಿರೋಧದಲ್ಲಿ';
+      return 'ತಟಸ್ಥ';
+    }
+    if (locale === 'ml') {
+      if (stance === 'for') return 'പക്ഷത്ത്';
+      if (stance === 'against') return 'എതിർ';
+      return 'നിഷ്പക്ഷം';
+    }
+    if (locale === 'te') {
+      if (stance === 'for') return 'మద్దతుగా';
+      if (stance === 'against') return 'వ్యతిరేకంగా';
+      return 'తటస్థం';
+    }
+    if (stance === 'for') return 'For';
+    if (stance === 'against') return 'Against';
+    return 'Neutral';
+  }
+
+  private hasVisibleBody(value: string | null | undefined): boolean {
+    return !!value && value.trim().length > 0;
+  }
+
+  canManageDraft(): boolean {
+    if (!this.proposal || this.proposal.status !== 'draft') return false;
+    const user = this.auth.user();
+    if (!user) return false;
+
+    const creator = this.proposal.created_by === user.id;
+    const admin = user.role === 'admin' || user.role === 'superadmin';
+    return creator || admin;
+  }
+
+  canSubmitForReview(): boolean {
+    const reviewStatus = this.proposal?.review_status || 'draft';
+    return reviewStatus === 'draft' || reviewStatus === 'changes_requested';
+  }
+
+  submitDraftForReview(): void {
+    if (!this.proposal) return;
+    this.draftActionBusy = true;
+    this.api.submitProposalForReview(this.proposal.id).subscribe({
+      next: (res) => {
+        this.toast.show(res.message);
+        if (this.proposal) {
+          this.proposal.review_status = 'pending_review';
+        }
+        this.draftActionBusy = false;
+      },
+      error: (err) => {
+        this.toast.show(err.error?.error || 'Failed to submit draft for review.');
+        this.draftActionBusy = false;
+      },
+    });
+  }
+
+  publishDraft(): void {
+    if (!this.proposal) return;
+    this.draftActionBusy = true;
+    this.api.publishProposal(this.proposal.id).subscribe({
+      next: (res) => {
+        this.toast.show(res.message);
+        if (this.proposal) {
+          this.proposal.status = res.status;
+          this.proposal.review_status = res.reviewStatus as any;
+        }
+        this.draftActionBusy = false;
+      },
+      error: (err) => {
+        this.toast.show(err.error?.error || 'Failed to publish draft.');
+        this.draftActionBusy = false;
+      },
+    });
+  }
+
+  deleteDraft(): void {
+    if (!this.proposal) return;
+    const confirmed = typeof window !== 'undefined'
+      ? window.confirm('Delete this draft permanently?')
+      : true;
+    if (!confirmed) return;
+
+    this.draftActionBusy = true;
+    this.api.deleteDraftProposal(this.proposal.id).subscribe({
+      next: (res) => {
+        this.toast.show(res.message);
+        this.draftActionBusy = false;
+        this.router.navigate(['/home']);
+      },
+      error: (err) => {
+        this.toast.show(err.error?.error || 'Failed to delete draft.');
+        this.draftActionBusy = false;
       },
     });
   }

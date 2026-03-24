@@ -25,6 +25,11 @@ const createCommunitySchema = z.object({
     category: z.string().min(2).max(50),
 });
 
+const updateGovernanceSettingsSchema = z.object({
+    quorumPercent: z.number().min(1).max(100),
+    minVoterCount: z.number().int().min(1).max(100000),
+});
+
 // ── GET /api/communities ────────────────────────────────────────────────────
 
 router.get('/', async (req: Request, res: Response) => {
@@ -345,6 +350,106 @@ router.post('/:slug/leave', authMiddleware, async (req: Request, res: Response) 
     } catch (err) {
         logger.error({ err }, 'Failed to leave community');
         res.status(500).json({ error: 'Failed to leave community.' });
+    }
+});
+
+// ── GET /api/communities/:slug/governance-settings ─────────────────────────
+
+router.get('/:slug/governance-settings', authMiddleware, async (req: Request, res: Response) => {
+    try {
+        const community = await db('communities').where({ slug: req.params.slug }).first();
+        if (!community) {
+            res.status(404).json({ error: 'Community not found.' });
+            return;
+        }
+
+        const membership = await db('community_members')
+            .where({ community_id: community.id, user_id: req.user!.userId })
+            .first();
+
+        if (!membership) {
+            res.status(403).json({ error: 'You must be a member to view governance settings.' });
+            return;
+        }
+
+        const settings = await db('community_governance_settings')
+            .where({ community_id: community.id })
+            .first();
+
+        res.json({
+            communityId: community.id,
+            quorumPercent: Number(settings?.quorum_percent ?? 20),
+            minVoterCount: Number(settings?.min_voter_count ?? 10),
+            enabled: settings?.enabled ?? true,
+        });
+    } catch (err) {
+        logger.error({ err }, 'Failed to fetch governance settings');
+        res.status(500).json({ error: 'Failed to fetch governance settings.' });
+    }
+});
+
+// ── PUT /api/communities/:slug/governance-settings ─────────────────────────
+
+router.put('/:slug/governance-settings', authMiddleware, async (req: Request, res: Response) => {
+    try {
+        const body = updateGovernanceSettingsSchema.parse(req.body);
+        const community = await db('communities').where({ slug: req.params.slug }).first();
+        if (!community) {
+            res.status(404).json({ error: 'Community not found.' });
+            return;
+        }
+
+        const membership = await db('community_members')
+            .where({ community_id: community.id, user_id: req.user!.userId })
+            .first();
+
+        const isCommunityReviewer = membership && ['owner', 'moderator'].includes(membership.role);
+        const isAdmin = req.user!.role === 'admin' || req.user!.role === 'superadmin';
+
+        if (!isCommunityReviewer && !isAdmin) {
+            res.status(403).json({ error: 'Only owner, moderator, or admin can update governance settings.' });
+            return;
+        }
+
+        await db('community_governance_settings')
+            .insert({
+                community_id: community.id,
+                quorum_percent: body.quorumPercent,
+                min_voter_count: body.minVoterCount,
+                enabled: true,
+            })
+            .onConflict('community_id')
+            .merge({
+                quorum_percent: body.quorumPercent,
+                min_voter_count: body.minVoterCount,
+                enabled: true,
+                updated_at: new Date(),
+            });
+
+        await db('audit_log').insert({
+            event_type: 'community_governance_settings_updated',
+            reference_id: community.id,
+            reference_table: 'communities',
+            actor_id: req.user!.userId,
+            details: {
+                quorumPercent: body.quorumPercent,
+                minVoterCount: body.minVoterCount,
+            },
+        });
+
+        res.json({
+            message: 'Governance settings updated.',
+            communityId: community.id,
+            quorumPercent: body.quorumPercent,
+            minVoterCount: body.minVoterCount,
+        });
+    } catch (err) {
+        if (err instanceof z.ZodError) {
+            res.status(400).json({ error: 'Validation failed.', details: err.errors });
+            return;
+        }
+        logger.error({ err }, 'Failed to update governance settings');
+        res.status(500).json({ error: 'Failed to update governance settings.' });
     }
 });
 

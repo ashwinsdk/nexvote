@@ -1,11 +1,13 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
-import { ApiService } from '../../services/api.service';
+import { ApiService, ProposalTemplate } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { I18nService } from '../../services/i18n.service';
 import { ToastService } from '../../services/toast.service';
+import { OfflineDraftService } from '../../services/offline-draft.service';
+import { NetworkPreferencesService } from '../../services/network-preferences.service';
 
 @Component({
   selector: 'nv-proposal-create',
@@ -87,6 +89,22 @@ import { ToastService } from '../../services/toast.service';
           </div>
 
           <div class="form-group">
+            <label class="form-label" for="template">Proposal Template</label>
+            <select
+              id="template"
+              class="nv-input"
+              [(ngModel)]="selectedTemplateId"
+              name="selectedTemplateId"
+              (ngModelChange)="onTemplateChange($event)"
+            >
+              <option value="">No template</option>
+              @for (template of templates; track template.id) {
+                <option [value]="template.id">{{ template.name }} ({{ template.category }})</option>
+              }
+            </select>
+          </div>
+
+          <div class="form-group">
             <label class="form-label" for="text">{{ i18n.t('create.desc.label') }}</label>
             <textarea
               id="text"
@@ -101,6 +119,125 @@ import { ToastService } from '../../services/toast.service';
             <span class="char-count" [class.warning]="text.length < 50 && text.length > 0">
               {{ text.length }} / 50 min
             </span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="problemStatement">Problem Statement</label>
+            <textarea
+              id="problemStatement"
+              class="nv-input textarea"
+              [(ngModel)]="problemStatement"
+              name="problemStatement"
+              placeholder="Describe the public problem this proposal solves"
+              required
+              minlength="20"
+              rows="4"
+            ></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="beneficiaries">Beneficiaries</label>
+            <textarea
+              id="beneficiaries"
+              class="nv-input"
+              [(ngModel)]="beneficiaries"
+              name="beneficiaries"
+              placeholder="Who benefits and approximately how many people"
+              required
+              minlength="10"
+              rows="3"
+            ></textarea>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label" for="timeline">Implementation Timeline</label>
+              <input
+                id="timeline"
+                type="text"
+                class="nv-input"
+                [(ngModel)]="timeline"
+                name="timeline"
+                placeholder="e.g. 3 phases over 6 months"
+                required
+              />
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label" for="expectedCost">Expected Cost</label>
+              <input
+                id="expectedCost"
+                type="number"
+                class="nv-input"
+                [(ngModel)]="expectedCost"
+                name="expectedCost"
+                min="0"
+                required
+              />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="impactSummary">Impact Summary</label>
+            <textarea
+              id="impactSummary"
+              class="nv-input"
+              [(ngModel)]="impactSummary"
+              name="impactSummary"
+              placeholder="Expected measurable impact after implementation"
+              required
+              minlength="20"
+              rows="3"
+            ></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="riskAnalysis">Risk / Impact Analysis</label>
+            <textarea
+              id="riskAnalysis"
+              class="nv-input"
+              [(ngModel)]="riskAnalysis"
+              name="riskAnalysis"
+              placeholder="Major risks, mitigation, and negative side-effects"
+              required
+              minlength="20"
+              rows="3"
+            ></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="attachmentProofUrl">Attachment / Proof URL</label>
+            <input
+              id="attachmentProofUrl"
+              type="url"
+              class="nv-input"
+              [(ngModel)]="attachmentProofUrl"
+              name="attachmentProofUrl"
+              placeholder="https://..."
+              required
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                [(ngModel)]="submitForReview"
+                name="submitForReview"
+              />
+              Submit for review immediately after draft creation
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input
+                type="checkbox"
+                [checked]="networkPrefs.isLowBandwidth()"
+                (change)="toggleLowBandwidth($event)"
+              />
+              Low-bandwidth mode
+            </label>
           </div>
 
           <div class="form-row">
@@ -144,20 +281,12 @@ import { ToastService } from '../../services/toast.service';
             class="nv-btn nv-btn-primary submit-btn"
             [disabled]="submitting"
           >
-            @if (submitting && loadingStatus) {
-              <span>{{ loadingStatus }}</span>
-            } @else if (submitting) {
+            @if (submitting) {
               <span>{{ i18n.t('create.submitting') }}</span>
             } @else {
               <span>{{ i18n.t('create.submit') }}</span>
             }
           </button>
-          @if (loadingStatus) {
-            <div class="loading-status-detail">
-              <div class="loading-spinner"></div>
-              <span>{{ loadingStatus }}</span>
-            </div>
-          }
         </form>
       </div>
     </div>
@@ -372,50 +501,28 @@ import { ToastService } from '../../services/toast.service';
       }
     }
 
-    /* ── Loading Status ── */
-    .loading-status-detail {
-      display: flex;
-      align-items: center;
-      gap: var(--sp-1);
-      margin-top: var(--sp-2);
-      padding: var(--sp-2);
-      background: var(--bg-muted);
-      border: 2px solid var(--border);
-      border-radius: var(--r-sm);
-      font-size: var(--fs-sm);
-      color: var(--text-secondary);
-      animation: pulse 2s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.7; }
-    }
-
-    .loading-spinner {
-      width: 16px;
-      height: 16px;
-      border: 2px solid var(--border-strong);
-      border-top-color: var(--brand);
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
   `],
 })
 export class ProposalCreateComponent implements OnInit {
   title = '';
   text = '';
+  problemStatement = '';
+  beneficiaries = '';
+  timeline = '';
+  expectedCost = 0;
+  impactSummary = '';
+  riskAnalysis = '';
+  attachmentProofUrl = '';
+  submitForReview = true;
+  templates: ProposalTemplate[] = [];
+  selectedTemplateId = '';
+  private draftTimer: any;
   category = '';
   deadlineDays = 7;
   communityId = '';
   communityName = '';
   error = '';
   submitting = false;
-  loadingStatus = '';
   duplicates: any[] = [];
 
   // Community dropdown
@@ -431,7 +538,9 @@ export class ProposalCreateComponent implements OnInit {
     private route: ActivatedRoute,
     private router: Router,
     public i18n: I18nService,
-    private toast: ToastService
+    private toast: ToastService,
+    private offlineDrafts: OfflineDraftService,
+    public networkPrefs: NetworkPreferencesService
   ) { }
 
   ngOnInit(): void {
@@ -443,6 +552,7 @@ export class ProposalCreateComponent implements OnInit {
         next: (community) => {
           this.communityName = community.name;
           this.communityId = community.id;
+          this.loadTemplates();
         },
         error: () => {
           this.error = 'Failed to load community details.';
@@ -451,6 +561,15 @@ export class ProposalCreateComponent implements OnInit {
     } else {
       // Load joined communities for dropdown
       this.loadJoinedCommunities();
+    }
+
+    this.restoreDraft();
+    this.draftTimer = setInterval(() => this.persistDraft(), 3000);
+  }
+
+  ngOnDestroy(): void {
+    if (this.draftTimer) {
+      clearInterval(this.draftTimer);
     }
   }
 
@@ -476,6 +595,77 @@ export class ProposalCreateComponent implements OnInit {
     this.communityName = community.name;
     this.showCommunityDropdown = false;
     this.communitySearch = '';
+    this.loadTemplates();
+  }
+
+  loadTemplates(): void {
+    this.api.getProposalTemplates({ communityId: this.communityId || undefined }).subscribe({
+      next: (res) => {
+        this.templates = res.templates;
+      },
+    });
+  }
+
+  onTemplateChange(templateId: string): void {
+    this.selectedTemplateId = templateId;
+    const template = this.templates.find((item) => item.id === templateId);
+    if (!template) {
+      return;
+    }
+
+    if (!this.category) {
+      this.category = template.category;
+    }
+  }
+
+  private draftKey(): string {
+    return `proposal-create-${this.communityId || 'global'}`;
+  }
+
+  private persistDraft(): void {
+    this.offlineDrafts.saveDraft(this.draftKey(), {
+      communityId: this.communityId,
+      title: this.title,
+      text: this.text,
+      problemStatement: this.problemStatement,
+      beneficiaries: this.beneficiaries,
+      timeline: this.timeline,
+      expectedCost: this.expectedCost,
+      impactSummary: this.impactSummary,
+      riskAnalysis: this.riskAnalysis,
+      attachmentProofUrl: this.attachmentProofUrl,
+      category: this.category,
+      deadlineDays: this.deadlineDays,
+      selectedTemplateId: this.selectedTemplateId,
+      submitForReview: this.submitForReview,
+    });
+  }
+
+  private restoreDraft(): void {
+    const saved = this.offlineDrafts.getDraft(this.draftKey());
+    if (!saved) {
+      return;
+    }
+
+    const value = saved.data || {};
+    this.title = value.title || this.title;
+    this.text = value.text || this.text;
+    this.problemStatement = value.problemStatement || this.problemStatement;
+    this.beneficiaries = value.beneficiaries || this.beneficiaries;
+    this.timeline = value.timeline || this.timeline;
+    this.expectedCost = Number(value.expectedCost ?? this.expectedCost);
+    this.impactSummary = value.impactSummary || this.impactSummary;
+    this.riskAnalysis = value.riskAnalysis || this.riskAnalysis;
+    this.attachmentProofUrl = value.attachmentProofUrl || this.attachmentProofUrl;
+    this.category = value.category || this.category;
+    this.deadlineDays = Number(value.deadlineDays ?? this.deadlineDays);
+    this.selectedTemplateId = value.selectedTemplateId || this.selectedTemplateId;
+    this.submitForReview = value.submitForReview ?? this.submitForReview;
+  }
+
+  toggleLowBandwidth(event: Event): void {
+    const checked = (event.target as HTMLInputElement).checked;
+    this.networkPrefs.setLowBandwidth(checked);
   }
 
   onSubmit(): void {
@@ -484,41 +674,64 @@ export class ProposalCreateComponent implements OnInit {
       return;
     }
 
-    if (this.title.length < 10 || this.text.length < 50 || !this.category) {
-      this.error = 'Please fill all fields. Title must be 10+ chars, description 50+ chars.';
+    if (
+      this.title.length < 10 ||
+      this.text.length < 50 ||
+      !this.category ||
+      this.problemStatement.length < 20 ||
+      this.beneficiaries.length < 10 ||
+      this.timeline.length < 5 ||
+      this.expectedCost < 0 ||
+      this.impactSummary.length < 20 ||
+      this.riskAnalysis.length < 20 ||
+      !this.attachmentProofUrl
+    ) {
+      this.error = 'Please complete all mandatory quality fields before submitting.';
       return;
     }
 
     this.submitting = true;
     this.error = '';
     this.duplicates = [];
-    this.loadingStatus = 'Preparing proposal...';
 
-    // Simulate different stages for better UX
-    setTimeout(() => {
-      this.loadingStatus = 'AI is generating summary...';
-    }, 500);
-
-    setTimeout(() => {
-      this.loadingStatus = 'Checking for duplicates...';
-    }, 1500);
-
-    setTimeout(() => {
-      this.loadingStatus = 'Creating proposal...';
-    }, 2500);
-
-    this.api
-      .createProposal({
+    const request$ = this.selectedTemplateId
+      ? this.api.createProposalFromTemplate(this.selectedTemplateId, {
+        communityId: this.communityId,
+        title: this.title,
+        text: this.text,
+        deadlineDays: this.deadlineDays,
+        submitForReview: this.submitForReview,
+        values: {
+          problemStatement: this.problemStatement,
+          expectedCost: this.expectedCost,
+          beneficiaries: this.beneficiaries,
+          timeline: this.timeline,
+          impactSummary: this.impactSummary,
+          riskAnalysis: this.riskAnalysis,
+          attachmentProofUrl: this.attachmentProofUrl,
+        },
+      })
+      : this.api.createProposal({
         communityId: this.communityId,
         title: this.title,
         text: this.text,
         category: this.category,
+        problemStatement: this.problemStatement,
+        expectedCost: this.expectedCost,
+        beneficiaries: this.beneficiaries,
+        timeline: this.timeline,
+        impactSummary: this.impactSummary,
+        riskAnalysis: this.riskAnalysis,
+        attachmentsProof: [this.attachmentProofUrl],
+        submitForReview: this.submitForReview,
         deadlineDays: this.deadlineDays,
-      })
+      });
+
+    request$
       .subscribe({
         next: (proposal) => {
-          this.loadingStatus = 'Success! Redirecting...';
           this.toast.show(this.i18n.t('toast.proposal'));
+          this.offlineDrafts.clearDraft(this.draftKey());
           setTimeout(() => {
             this.router.navigate(['/proposal', proposal.id]);
           }, 500);
@@ -531,7 +744,6 @@ export class ProposalCreateComponent implements OnInit {
             this.error = err.error?.error || 'Failed to create proposal.';
           }
           this.submitting = false;
-          this.loadingStatus = '';
         },
       });
   }

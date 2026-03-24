@@ -4,6 +4,7 @@ import { RouterLink } from '@angular/router';
 import { ApiService, Proposal } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { I18nService } from '../../services/i18n.service';
+import { NetworkPreferencesService } from '../../services/network-preferences.service';
 
 @Component({
   selector: 'nv-home',
@@ -28,11 +29,33 @@ import { I18nService } from '../../services/i18n.service';
             <a routerLink="/communities" class="nv-btn nv-btn-primary">{{ i18n.t('general.browsecommunitites') }}</a>
             <a routerLink="/proposals/new" class="nv-btn nv-btn-outline">{{ i18n.t('general.newproposal') }}</a>
           }
+          <label class="nv-btn nv-btn-outline">
+            <input type="checkbox" [checked]="networkPrefs.isLowBandwidth()" (change)="toggleLowBandwidth($event)" />
+            Low-bandwidth mode
+          </label>
         </div>
       </section>
 
       <!-- Feed -->
       <section class="feed-section">
+        @if (auth.isLoggedIn() && myDrafts.length > 0) {
+          <div class="drafts-section">
+            <h3 class="drafts-title">My Drafts</h3>
+            @for (draft of myDrafts; track draft.id) {
+              <a [routerLink]="['/proposal', draft.id]" class="proposal-card draft-card">
+                <div class="proposal-meta">
+                  <span class="nv-badge nv-badge-primary">{{ draft.category }}</span>
+                  <span class="meta-text">{{ draft.community_name }}</span>
+                  <span class="meta-dot">·</span>
+                  <span class="meta-text">{{ draft.review_status || 'draft' }}</span>
+                </div>
+                <h3 class="proposal-title">{{ draft.title }}</h3>
+                <p class="proposal-summary">{{ draft.summary || (draft.text | slice:0:120) + '...' }}</p>
+              </a>
+            }
+          </div>
+        }
+
         <div class="feed-tabs">
           <button class="feed-tab" [class.active]="activeSort === 'hot'" (click)="loadProposals('hot')">
             {{ i18n.t('home.tab.trending') }}
@@ -43,6 +66,11 @@ import { I18nService } from '../../services/i18n.service';
           <button class="feed-tab" [class.active]="activeSort === 'top'" (click)="loadProposals('top')">
             {{ i18n.t('home.tab.top') }}
           </button>
+          @if (auth.isLoggedIn()) {
+            <button class="feed-tab" [class.active]="activeSort === 'activity'" (click)="loadProposals('activity')">
+              Activity
+            </button>
+          }
         </div>
 
         @if (loading) {
@@ -70,7 +98,7 @@ import { I18nService } from '../../services/i18n.service';
             </div>
             <h3 class="proposal-title">{{ proposal.title }}</h3>
             <p class="proposal-summary">
-              {{ proposal.summary || (proposal.text | slice:0:150) + '...' }}
+              {{ networkPrefs.shouldReducePayloads() ? (proposal.title | slice:0:100) + '...' : (proposal.summary || (proposal.text | slice:0:150) + '...') }}
             </p>
             <div class="proposal-footer">
               <div class="vote-counts">
@@ -131,6 +159,28 @@ import { I18nService } from '../../services/i18n.service';
     /* ── Feed ── */
     .feed-section {
       padding-top: var(--sp-3);
+    }
+
+    .drafts-section {
+      margin-bottom: var(--sp-3);
+      padding: var(--sp-2);
+      border: 2px dashed var(--border);
+      border-radius: var(--r-sm);
+      background: var(--bg-muted);
+    }
+
+    .drafts-title {
+      margin: 0 0 var(--sp-1);
+      font-size: var(--fs-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+
+    .draft-card {
+      margin-bottom: var(--sp-1);
+      background: white;
     }
 
     .feed-tabs {
@@ -350,12 +400,21 @@ import { I18nService } from '../../services/i18n.service';
 })
 export class HomeComponent implements OnInit {
   proposals: Proposal[] = [];
+  myDrafts: Proposal[] = [];
   loading = false;
   activeSort = 'hot';
 
-  constructor(public auth: AuthService, private api: ApiService, public i18n: I18nService) { }
+  constructor(
+    public auth: AuthService,
+    private api: ApiService,
+    public i18n: I18nService,
+    public networkPrefs: NetworkPreferencesService
+  ) { }
 
   ngOnInit(): void {
+    if (this.auth.isLoggedIn()) {
+      this.loadMyDrafts();
+    }
     this.loadProposals('hot');
   }
 
@@ -363,12 +422,49 @@ export class HomeComponent implements OnInit {
     this.activeSort = sort;
     this.loading = true;
 
-    const params: any = { sort, limit: 20 };
+    if (sort === 'activity' && this.auth.isLoggedIn()) {
+      this.api.getActivityFeed({ limit: this.networkPrefs.shouldReducePayloads() ? 10 : 20 }).subscribe({
+        next: (feed) => {
+          this.proposals = feed.items
+            .filter((item: any) => item.entity_type === 'proposal' && item.metadata)
+            .map((item: any) => ({
+              id: item.entity_id,
+              title: item.metadata.title || 'Proposal update',
+              text: item.metadata.body || '',
+              summary: item.metadata.summary || '',
+              category: item.metadata.category || 'activity',
+              status: item.metadata.status || 'active',
+              yes_count: 0,
+              no_count: 0,
+              abstain_count: 0,
+              community_id: '',
+              deadline: null,
+              proposal_hash: null,
+              result_hash: null,
+              tx_hash: null,
+              created_by: '',
+              region_code: '',
+              created_at: item.created_at,
+              finalized_at: null,
+              community_name: item.metadata.communityName || 'Community',
+              author_name: item.metadata.authorName || 'System',
+            })) as Proposal[];
+          this.loading = false;
+        },
+        error: () => {
+          this.loading = false;
+        },
+      });
+      return;
+    }
+
+    const params: any = { sort, limit: this.networkPrefs.shouldReducePayloads() ? 10 : 20 };
 
     if (this.auth.isLoggedIn()) {
       this.api.getEligibleProposals(params).subscribe({
         next: (res) => {
           this.proposals = res.proposals;
+          this.loadMyDrafts();
           this.loading = false;
         },
         error: () => {
@@ -386,5 +482,26 @@ export class HomeComponent implements OnInit {
         },
       });
     }
+  }
+
+  toggleLowBandwidth(event: Event): void {
+    this.networkPrefs.setLowBandwidth((event.target as HTMLInputElement).checked);
+    this.loadProposals(this.activeSort);
+  }
+
+  private loadMyDrafts(): void {
+    if (!this.auth.isLoggedIn()) {
+      this.myDrafts = [];
+      return;
+    }
+
+    this.api.getMyProposals({ status: 'draft', limit: 10 }).subscribe({
+      next: (res) => {
+        this.myDrafts = res.proposals || [];
+      },
+      error: () => {
+        this.myDrafts = [];
+      },
+    });
   }
 }

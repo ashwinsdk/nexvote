@@ -8,6 +8,7 @@ import { config } from '../config';
 import logger from '../logger';
 import { authMiddleware } from '../middleware/auth';
 import { emailService } from '../services/email';
+import { createFraudAlert, detectRegistrationRisk } from '../services/fraud';
 
 const router = Router();
 
@@ -96,6 +97,28 @@ router.post('/register', async (req: Request, res: Response) => {
                 role: 'user',
             })
             .returning(['id', 'email', 'display_name', 'region_code', 'role', 'signup_verified', 'created_at']);
+
+        const registrationRisk = await detectRegistrationRisk({
+            email: body.email,
+            mobileHash: body.mobileHash,
+            regionCode: body.regionCode,
+        });
+
+        if (registrationRisk.reasons.length > 0) {
+            await createFraudAlert({
+                alertType: 'registration_risk',
+                severity: registrationRisk.severity,
+                referenceTable: 'users',
+                referenceId: user.id,
+                actorId: user.id,
+                summary: `Registration risk signals for ${body.email}`,
+                details: {
+                    reasons: registrationRisk.reasons,
+                    regionCode: body.regionCode,
+                    email: body.email,
+                },
+            });
+        }
 
         await sendOtpEmail(body.email, body.displayName);
 

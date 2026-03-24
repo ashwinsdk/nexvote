@@ -87,6 +87,14 @@ export const routes: Routes = [
         canActivate: [authGuard],
     },
     {
+        path: 'transparency',
+        loadComponent: () =>
+            import('./pages/transparency-dashboard/transparency-dashboard.component').then(
+                (m) => m.TransparencyDashboardComponent
+            ),
+        canActivate: [authGuard],
+    },
+    {
         path: 'user/:id',
         loadComponent: () =>
             import('./pages/user-profile/user-profile.component').then(

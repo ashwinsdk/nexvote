@@ -14,6 +14,8 @@ type ProposalForFinalize = {
     community_id?: string;
     title?: string;
     title_en?: string;
+    proposal_hash?: string | null;
+    eligible_voter_count_snapshot?: number | null;
 };
 
 type FinalizeOptions = {
@@ -23,10 +25,49 @@ type FinalizeOptions = {
     addAdminAction: boolean;
 };
 
-const computeFinalStatus = (proposal: ProposalForFinalize): 'passed' | 'failed' => {
+const computeFinalStatus = async (proposal: ProposalForFinalize): Promise<{
+    status: 'passed' | 'failed';
+    totalVotes: number;
+    eligibleVoters: number;
+    participationRate: number;
+    quorumPercent: number;
+    minVoterCount: number;
+    quorumMet: boolean;
+}> => {
     const totalVotes = proposal.yes_count + proposal.no_count + proposal.abstain_count;
-    const passed = totalVotes > 0 && proposal.yes_count / totalVotes > 0.51;
-    return passed ? 'passed' : 'failed';
+
+    const settings = await db('community_governance_settings')
+        .where({ community_id: proposal.community_id, enabled: true })
+        .first();
+
+    const quorumPercent = Number(settings?.quorum_percent ?? 20);
+    const minVoterCount = Number(settings?.min_voter_count ?? 10);
+
+    let eligibleVoters = Number(proposal.eligible_voter_count_snapshot || 0);
+    if (!eligibleVoters && proposal.community_id) {
+        const [row] = await db('community_members')
+            .where({ community_id: proposal.community_id })
+            .where((qb) => {
+                qb.where('status', 'approved').orWhereNull('status');
+            })
+            .count('* as count');
+        eligibleVoters = parseInt(String(row?.count || '0'), 10);
+    }
+
+    const participationRate = eligibleVoters > 0 ? (totalVotes / eligibleVoters) * 100 : 0;
+    const quorumMet = totalVotes >= minVoterCount && participationRate >= quorumPercent;
+
+    const passed = quorumMet && totalVotes > 0 && proposal.yes_count / totalVotes > 0.51;
+
+    return {
+        status: passed ? 'passed' : 'failed',
+        totalVotes,
+        eligibleVoters,
+        participationRate,
+        quorumPercent,
+        minVoterCount,
+        quorumMet,
+    };
 };
 
 const isExpired = (deadline: string | Date | null): boolean => {
@@ -36,17 +77,29 @@ const isExpired = (deadline: string | Date | null): boolean => {
     return new Date(deadline) < new Date();
 };
 
+const isProposalNotRegisteredError = (err: unknown): boolean => {
+    const message = err instanceof Error ? err.message : String(err || '');
+    return message.toLowerCase().includes('proposal not registered');
+};
+
 const finalizeProposal = async (
     proposal: ProposalForFinalize,
     options: FinalizeOptions
 ): Promise<{ finalized: boolean; status: 'passed' | 'failed'; resultHash: string; txHash: string | null }> => {
-    const status = computeFinalStatus(proposal);
+    const outcome = await computeFinalStatus(proposal);
+    const status = outcome.status;
 
     const resultData = JSON.stringify({
         proposalId: proposal.id,
         yesCount: proposal.yes_count,
         noCount: proposal.no_count,
         abstainCount: proposal.abstain_count,
+        totalVotes: outcome.totalVotes,
+        eligibleVoters: outcome.eligibleVoters,
+        participationRate: outcome.participationRate,
+        quorumPercent: outcome.quorumPercent,
+        minVoterCount: outcome.minVoterCount,
+        quorumMet: outcome.quorumMet,
         status,
         finalizedBy: options.actorId || 'system',
         finalizedAt: new Date().toISOString(),
@@ -60,6 +113,9 @@ const finalizeProposal = async (
         .update({
             status,
             result_hash: resultHash,
+            eligible_voter_count_snapshot: outcome.eligibleVoters,
+            participation_rate: outcome.participationRate,
+            quorum_met: outcome.quorumMet,
             finalized_at: new Date(),
             updated_at: new Date(),
         });
@@ -85,7 +141,22 @@ const finalizeProposal = async (
             await db('proposals').where({ id: proposal.id }).update({ tx_hash: txHash });
         }
     } catch (relayErr) {
-        logger.error({ err: relayErr, proposalId: proposal.id }, 'Relayer failed to finalize on-chain');
+        if (isProposalNotRegisteredError(relayErr) && proposal.proposal_hash) {
+            try {
+                await relayerService.registerProposal(proposal.proposal_hash, proposal.id, 0);
+                txHash = await relayerService.finalizeVote(proposal.id, resultHash);
+                if (txHash) {
+                    await db('proposals').where({ id: proposal.id }).update({ tx_hash: txHash });
+                }
+            } catch (retryErr) {
+                logger.error(
+                    { err: retryErr, proposalId: proposal.id },
+                    'Relayer retry failed after auto-register attempt'
+                );
+            }
+        } else {
+            logger.error({ err: relayErr, proposalId: proposal.id }, 'Relayer failed to finalize on-chain');
+        }
     }
 
     await db('audit_log').insert({
@@ -101,6 +172,12 @@ const finalizeProposal = async (
             yesCount: proposal.yes_count,
             noCount: proposal.no_count,
             abstainCount: proposal.abstain_count,
+            totalVotes: outcome.totalVotes,
+            eligibleVoters: outcome.eligibleVoters,
+            participationRate: outcome.participationRate,
+            quorumPercent: outcome.quorumPercent,
+            minVoterCount: outcome.minVoterCount,
+            quorumMet: outcome.quorumMet,
         },
     });
 
@@ -124,12 +201,14 @@ export const finalizeExpiredProposals = async (limit = 50): Promise<number> => {
             'id',
             'status',
             'deadline',
+            'proposal_hash',
             'yes_count',
             'no_count',
             'abstain_count',
             'community_id',
             'title',
-            'title_en'
+            'title_en',
+            'eligible_voter_count_snapshot'
         )
         .where('status', 'voting')
         .whereNotNull('deadline')
@@ -158,12 +237,14 @@ export const finalizeIfExpired = async (proposalId: string): Promise<boolean> =>
             'id',
             'status',
             'deadline',
+            'proposal_hash',
             'yes_count',
             'no_count',
             'abstain_count',
             'community_id',
             'title',
-            'title_en'
+            'title_en',
+            'eligible_voter_count_snapshot'
         )
         .where({ id: proposalId })
         .first();

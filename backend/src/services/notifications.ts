@@ -67,6 +67,38 @@ class NotificationService {
             entity_id: input.entityId || null,
             metadata: input.metadata || null,
         });
+
+        await this.pushFeedItem({
+            userId: input.userId,
+            eventType: input.type,
+            entityType: input.entityType || null,
+            entityId: input.entityId || null,
+            metadata: {
+                title: input.title,
+                body: input.body,
+                ...(input.metadata || {}),
+            },
+        });
+    }
+
+    async pushFeedItem(params: {
+        userId: string;
+        eventType: string;
+        entityType?: string | null;
+        entityId?: string | null;
+        metadata?: Record<string, any>;
+    }): Promise<void> {
+        try {
+            await db('personalized_feed_items').insert({
+                user_id: params.userId,
+                event_type: params.eventType,
+                entity_type: params.entityType || null,
+                entity_id: params.entityId || null,
+                metadata: params.metadata || null,
+            });
+        } catch (err) {
+            logger.debug({ err }, 'Skipping feed item insert (migration may be pending)');
+        }
     }
 
     async sendEmailIfEnabled(params: {
@@ -184,13 +216,19 @@ class NotificationService {
         communityId: string;
     }): Promise<void> {
         const members = await db('community_members').select('user_id').where({ community_id: params.communityId });
+        const watchers = await db('proposal_watchers').select('user_id').where({ proposal_id: params.proposalId });
+        const recipients = new Set<string>([
+            ...members.map((m: any) => m.user_id),
+            ...watchers.map((w: any) => w.user_id),
+        ]);
+
         await Promise.all(
-            members.map(async (m: any) => {
-                if (!(await this.isCommunityAllowed(m.user_id, params.communityId))) {
+            Array.from(recipients).map(async (userId) => {
+                if (!(await this.isCommunityAllowed(userId, params.communityId))) {
                     return;
                 }
                 await this.createInApp({
-                    userId: m.user_id,
+                    userId,
                     type: 'vote_result',
                     title: 'Voting result published',
                     body: `${params.title} is now ${params.status}.`,
@@ -199,7 +237,7 @@ class NotificationService {
                 });
 
                 await this.sendEmailIfEnabled({
-                    userId: m.user_id,
+                    userId,
                     settingKey: 'vote_result_enabled',
                     subject: 'Voting result is out',
                     html: `<p><strong>${params.title}</strong> status: <strong>${params.status}</strong>.</p>`,
@@ -216,13 +254,19 @@ class NotificationService {
         actorId: string;
     }): Promise<void> {
         const members = await db('community_members').select('user_id').where({ community_id: params.communityId });
+        const watchers = await db('proposal_watchers').select('user_id').where({ proposal_id: params.proposalId });
+        const recipients = new Set<string>([
+            ...members.map((m: any) => m.user_id),
+            ...watchers.map((w: any) => w.user_id),
+        ]);
+
         await Promise.all(
-            members.map(async (m: any) => {
-                if (!(await this.isCommunityAllowed(m.user_id, params.communityId))) {
+            Array.from(recipients).map(async (userId) => {
+                if (!(await this.isCommunityAllowed(userId, params.communityId))) {
                     return;
                 }
                 await this.createInApp({
-                    userId: m.user_id,
+                    userId,
                     actorId: params.actorId,
                     type: 'status_update',
                     title: 'Policy status updated',
@@ -232,7 +276,7 @@ class NotificationService {
                 });
 
                 await this.sendEmailIfEnabled({
-                    userId: m.user_id,
+                    userId,
                     settingKey: 'status_update_enabled',
                     subject: 'Policy status updated',
                     html: `<p><strong>${params.title}</strong> has been updated to <strong>${params.status}</strong>.</p>`,

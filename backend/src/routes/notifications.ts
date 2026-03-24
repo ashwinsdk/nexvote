@@ -20,6 +20,10 @@ const communitySettingSchema = z.object({
     enabled: z.boolean(),
 });
 
+const watchProposalSchema = z.object({
+    watch: z.boolean(),
+});
+
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
     const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
     const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || '20', 10)));
@@ -178,6 +182,110 @@ router.put('/settings/communities/:communityId', authMiddleware, async (req: Req
         }
         res.status(500).json({ error: 'Failed to update community notification setting.' });
     }
+});
+
+router.post('/watch/proposals/:proposalId', authMiddleware, async (req: Request, res: Response) => {
+    try {
+        const body = watchProposalSchema.parse(req.body);
+        const proposalId = String(req.params.proposalId);
+
+        const proposal = await db('proposals').where({ id: proposalId }).first();
+        if (!proposal) {
+            res.status(404).json({ error: 'Proposal not found.' });
+            return;
+        }
+
+        if (body.watch) {
+            await db('proposal_watchers')
+                .insert({
+                    proposal_id: proposalId,
+                    user_id: req.user!.userId,
+                })
+                .onConflict(['proposal_id', 'user_id'])
+                .ignore();
+
+            await db('personalized_feed_items').insert({
+                user_id: req.user!.userId,
+                event_type: 'proposal_watched',
+                entity_id: proposalId,
+                entity_type: 'proposal',
+                metadata: {
+                    title: proposal.title,
+                },
+            });
+
+            res.json({ message: 'Proposal added to watchlist.' });
+            return;
+        }
+
+        await db('proposal_watchers').where({ proposal_id: proposalId, user_id: req.user!.userId }).del();
+        res.json({ message: 'Proposal removed from watchlist.' });
+    } catch (err) {
+        if (err instanceof z.ZodError) {
+            res.status(400).json({ error: 'Validation failed.', details: err.errors });
+            return;
+        }
+        res.status(500).json({ error: 'Failed to update watchlist.' });
+    }
+});
+
+router.get('/watch/proposals', authMiddleware, async (req: Request, res: Response) => {
+    const items = await db('proposal_watchers as pw')
+        .join('proposals as p', 'pw.proposal_id', 'p.id')
+        .join('communities as c', 'p.community_id', 'c.id')
+        .select(
+            'pw.created_at as watched_at',
+            'p.id',
+            'p.title',
+            'p.status',
+            'p.deadline',
+            'c.name as community_name'
+        )
+        .where({ 'pw.user_id': req.user!.userId })
+        .orderBy('pw.created_at', 'desc');
+
+    res.json({ proposals: items });
+});
+
+router.get('/feed/activity', authMiddleware, async (req: Request, res: Response) => {
+    const page = Math.max(1, parseInt((req.query.page as string) || '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) || '20', 10)));
+    const offset = (page - 1) * limit;
+
+    const feed = await db('personalized_feed_items')
+        .where({ user_id: req.user!.userId })
+        .orderBy('created_at', 'desc')
+        .limit(limit)
+        .offset(offset);
+
+    const [watchlistEvents] = await db('proposal_watchers')
+        .where({ user_id: req.user!.userId })
+        .count('* as count');
+
+    res.json({
+        items: feed,
+        page,
+        limit,
+        watchlistCount: parseInt(String(watchlistEvents?.count || '0'), 10),
+    });
+});
+
+router.get('/digests/community', authMiddleware, async (req: Request, res: Response) => {
+    const since = req.query.since ? new Date(String(req.query.since)) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const summaries = await db('notifications as n')
+        .join('proposals as p', function () {
+            this.on('n.entity_id', 'p.id').andOnVal('n.entity_type', '=', 'proposal');
+        })
+        .join('communities as c', 'p.community_id', 'c.id')
+        .select('c.id as community_id', 'c.name as community_name')
+        .count('n.id as event_count')
+        .where('n.user_id', req.user!.userId)
+        .andWhere('n.created_at', '>=', since)
+        .groupBy('c.id', 'c.name')
+        .orderBy('event_count', 'desc');
+
+    res.json({ since, communities: summaries });
 });
 
 export default router;
